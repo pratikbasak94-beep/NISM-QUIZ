@@ -8,6 +8,7 @@ import streamlit as st
 import sqlite3
 import json
 import os
+import threading
 from datetime import datetime
 
 try:
@@ -20,6 +21,7 @@ except ImportError:
 # ─────────────────────────────────────────────
 DB_PATH = "nism_quiz_results.db"
 QUESTIONS_PER_SESSION = 5
+GEMINI_MODEL = "gemini-2.5-flash"
 
 CHAPTERS = [
     {"id": 1,  "title": "Investment Landscape",                     "emoji": "🌐",
@@ -54,11 +56,11 @@ def init_db():
     cur = con.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            chapter   INTEGER NOT NULL,
-            score     INTEGER NOT NULL,
-            total     INTEGER NOT NULL,
-            date      TEXT NOT NULL
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            chapter INTEGER NOT NULL,
+            score   INTEGER NOT NULL,
+            total   INTEGER NOT NULL,
+            date    TEXT NOT NULL
         )
     """)
     cur.execute("""
@@ -88,7 +90,7 @@ def save_session(chapter_id, score, total, questions_data):
     session_id = cur.lastrowid
     for q in questions_data:
         cur.execute("""
-            INSERT INTO questions 
+            INSERT INTO questions
             (session_id, question, options, correct_idx, selected_idx, explanation, topic, is_correct)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
@@ -106,62 +108,130 @@ def save_session(chapter_id, score, total, questions_data):
     return session_id
 
 def get_all_sessions():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("""
-        SELECT s.id, s.chapter, s.score, s.total, s.date,
-               (SELECT title FROM json_each('[]'))
-        FROM sessions s
-        ORDER BY s.id DESC
-    """)
-    # Simpler query
-    cur.execute("SELECT id, chapter, score, total, date FROM sessions ORDER BY id DESC")
-    rows = cur.fetchall()
-    con.close()
-    return rows
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("SELECT id, chapter, score, total, date FROM sessions ORDER BY id DESC")
+        rows = cur.fetchall()
+        con.close()
+        return rows
+    except Exception:
+        return []
 
 def get_session_questions(session_id):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("""
-        SELECT question, options, correct_idx, selected_idx, explanation, topic, is_correct
-        FROM questions WHERE session_id = ? ORDER BY id
-    """, (session_id,))
-    rows = cur.fetchall()
-    con.close()
-    return rows
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT question, options, correct_idx, selected_idx, explanation, topic, is_correct
+            FROM questions WHERE session_id = ? ORDER BY id
+        """, (session_id,))
+        rows = cur.fetchall()
+        con.close()
+        return rows
+    except Exception:
+        return []
 
 def get_chapter_stats():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("""
-        SELECT chapter, COUNT(*) as attempts, SUM(score) as total_score, SUM(total) as total_q
-        FROM sessions GROUP BY chapter
-    """)
-    rows = cur.fetchall()
-    con.close()
-    return {r[0]: {"attempts": r[1], "score": r[2], "total": r[3]} for r in rows}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT chapter, COUNT(*) as attempts, SUM(score) as total_score, SUM(total) as total_q
+            FROM sessions GROUP BY chapter
+        """)
+        rows = cur.fetchall()
+        con.close()
+        return {r[0]: {"attempts": r[1], "score": r[2], "total": r[3]} for r in rows}
+    except Exception:
+        return {}
+
+# ─────────────────────────────────────────────
+# WORKBOOK LOADER
+# ─────────────────────────────────────────────
+WORKBOOK_PATH = "workbook.txt"
+
+# Chapter heading markers as they appear in the extracted PDF text
+CHAPTER_MARKERS = {
+    1:  "CHAPTER 1: INVESTMENT LANDSCAPE",
+    2:  "CHAPTER 2: CONCEPT AND ROLE OF A MUTUAL FUND",
+    3:  "CHAPTER 3: LEGAL STRUCTURE OF MUTUAL FUNDS IN INDIA",
+    4:  "CHAPTER 4: LEGAL AND REGULATORY FRAMEWORK",
+    5:  "CHAPTER 5: SCHEME RELATED INFORMATION",
+    6:  "CHAPTER 6: FUND DISTRIBUTION AND CHANNEL MANAGEMENT PRACTICES",
+    7:  "CHAPTER 7: NET ASSET VALUE, TOTAL EXPENSE RATIO AND PRICING OF UNITS",
+    8:  "CHAPTER 8: TAXATION",
+    9:  "CHAPTER 9: INVESTOR SERVICES",
+    10: "CHAPTER 10: RISK, RETURN AND PERFORMANCE OF FUNDS",
+    11: "CHAPTER 11: MUTUAL FUND SCHEME PERFORMANCE",
+}
+
+@st.cache_resource
+def load_workbook():
+    """Load and cache the full workbook text. Returns None if not found."""
+    if not os.path.exists(WORKBOOK_PATH):
+        return None
+    try:
+        with open(WORKBOOK_PATH, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+def get_chapter_text(chapter_id, max_chars=4000):
+    """Extract the relevant chapter section from the workbook."""
+    workbook = load_workbook()
+    if not workbook:
+        return None
+
+    marker = CHAPTER_MARKERS.get(chapter_id, "").upper()
+    next_marker = CHAPTER_MARKERS.get(chapter_id + 1, "").upper()
+
+    # Find start of this chapter
+    upper_wb = workbook.upper()
+    start = upper_wb.find(marker)
+    if start == -1:
+        return None
+
+    # Find start of next chapter (to know where this one ends)
+    if next_marker:
+        end = upper_wb.find(next_marker, start + 100)
+        chapter_text = workbook[start:end] if end != -1 else workbook[start:start + 15000]
+    else:
+        chapter_text = workbook[start:start + 15000]
+
+    # Return middle portion to avoid just headers/TOC — most content-rich part
+    if len(chapter_text) > max_chars:
+        # Skip first 500 chars (usually heading/objectives) and take max_chars from there
+        chapter_text = chapter_text[500:500 + max_chars]
+
+    return chapter_text.strip()
+
 
 # ─────────────────────────────────────────────
 # API — Google Gemini
 # ─────────────────────────────────────────────
-def generate_question(chapter, previous_topics):
-    api_key = st.session_state.get("api_key", "")
-    if not api_key:
-        st.error("⚠️ Please enter your Gemini API key in the sidebar.")
-        return None
-
-    if genai is None:
-        st.error("⚠️ Package missing. Run: pip install google-generativeai")
-        return None
-
+def _build_prompt(chapter, previous_topics):
     prev_str = ""
     if previous_topics:
         prev_str = f"\n\nAVOID repeating these topics already covered this session:\n{', '.join(previous_topics)}"
 
-    prompt = f"""You are an expert NISM Series V-A exam question generator. Generate ONE multiple-choice question for Chapter {chapter['id']}: "{chapter['title']}".
+    # Try to get actual workbook text for this chapter
+    workbook_text = get_chapter_text(chapter["id"])
+    if workbook_text:
+        context_section = f"""
+Use the following ACTUAL TEXT from the NISM Series V-A workbook (November 2025 edition) to base your question on:
 
-Key topics in this chapter: {chapter['topics']}{prev_str}
+--- WORKBOOK EXCERPT (Chapter {chapter['id']}) ---
+{workbook_text}
+--- END EXCERPT ---
+
+Base your question strictly on facts, figures, rules, and concepts present in this excerpt.
+Key topic areas: {chapter['topics']}"""
+    else:
+        context_section = f"\nKey topics in this chapter: {chapter['topics']}"
+
+    return f"""You are an expert NISM Series V-A exam question generator. Generate ONE multiple-choice question for Chapter {chapter['id']}: "{chapter['title']}".
+{context_section}{prev_str}
 
 Requirements:
 - Question must test real exam-worthy knowledge from the chapter
@@ -180,16 +250,104 @@ Respond ONLY with valid JSON (no markdown, no backticks):
   "topic": "brief topic tag e.g. NAV calculation"
 }}"""
 
+def _call_gemini(api_key, prompt):
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(GEMINI_MODEL)
+    response = model.generate_content(prompt)
+    text = response.text.strip().replace("```json", "").replace("```", "").strip()
+    return json.loads(text)
+
+def generate_question(chapter, previous_topics):
+    api_key = st.session_state.get("api_key", "")
+    if not api_key:
+        st.error("⚠️ Please enter your Gemini API key in the sidebar.")
+        return None
+    if genai is None:
+        st.error("⚠️ Package missing. Run: pip install google-generativeai")
+        return None
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        response = model.generate_content(prompt)
-        text = response.text.strip()
-        text = text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
+        return _call_gemini(api_key, _build_prompt(chapter, previous_topics))
     except Exception as e:
         st.error(f"Error generating question: {e}")
         return None
+
+def _preload_bg(api_key, chapter, previous_topics, store_key):
+    """Runs in background thread — stores result into session_state."""
+    if not api_key or genai is None:
+        return
+    try:
+        result = _call_gemini(api_key, _build_prompt(chapter, previous_topics))
+        st.session_state[store_key] = result
+    except Exception:
+        pass
+
+def start_preload(chapter, previous_topics, store_key):
+    """Start background preload only if not already started or ready."""
+    if store_key in st.session_state:
+        return
+    # Mark as started with None so we don't double-start
+    st.session_state[store_key] = None
+    api_key = st.session_state.get("api_key", "")
+    t = threading.Thread(
+        target=_preload_bg,
+        args=(api_key, chapter, previous_topics, store_key),
+        daemon=True
+    )
+    t.start()
+
+def preload_key(ch_id, q_num):
+    return f"preload_ch{ch_id}_q{q_num}"
+
+# ─────────────────────────────────────────────
+# DOWNLOAD HELPER
+# ─────────────────────────────────────────────
+def build_txt_content(session_id):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT chapter, score, total, date FROM sessions WHERE id=?", (session_id,))
+    sess = cur.fetchone()
+    con.close()
+    if not sess:
+        return ""
+
+    ch_id, score, total, date = sess
+    chapter = get_chapter_by_id(ch_id)
+    rows = get_session_questions(session_id)
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append("NISM Series V-A — Mock Quiz Results")
+    lines.append("=" * 60)
+    lines.append(f"Chapter : {ch_id}. {chapter['title']}")
+    lines.append(f"Date    : {date}")
+    lines.append(f"Score   : {score}/{total} ({round((score/total)*100)}%)")
+    lines.append("=" * 60)
+    lines.append("")
+
+    for i, row in enumerate(rows, 1):
+        question, options_json, correct_idx, selected_idx, explanation, topic, is_correct = row
+        options = json.loads(options_json)
+        result = "CORRECT" if is_correct else "INCORRECT"
+        lines.append(f"Q{i}. [{topic}] — {result}")
+        lines.append(question)
+        lines.append("")
+        for j, opt in enumerate(options):
+            if j == correct_idx and j == selected_idx:
+                prefix = "YOUR ANSWER (CORRECT) ->"
+            elif j == correct_idx:
+                prefix = "CORRECT ANSWER         ->"
+            elif j == selected_idx:
+                prefix = "YOUR ANSWER (WRONG)    ->"
+            else:
+                prefix = "                        "
+            lines.append(f"  {chr(65+j)}. {prefix} {opt}")
+        lines.append("")
+        lines.append(f"Explanation: {explanation}")
+        lines.append("")
+        lines.append("-" * 60)
+        lines.append("")
+
+    return "\n".join(lines)
 
 # ─────────────────────────────────────────────
 # STYLING
@@ -204,172 +362,49 @@ def inject_pwa():
     <meta name="theme-color" content="#d4a843">
     """, unsafe_allow_html=True)
 
-
 def inject_css():
     st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&family=DM+Mono:wght@400;500&display=swap');
-
     html, body, [class*="css"] { font-family: 'Crimson Pro', Georgia, serif; }
-
     .stApp { background-color: #0d0f14; }
-
     h1, h2, h3 { color: #f0e8d8 !important; font-family: 'Crimson Pro', serif !important; }
-
-    .badge {
-        display: inline-block;
-        background: #1a1d24;
-        border: 1px solid #d4a843;
-        color: #d4a843;
-        font-family: 'DM Mono', monospace;
-        font-size: 11px;
-        letter-spacing: 2px;
-        padding: 4px 14px;
-        border-radius: 2px;
-        text-transform: uppercase;
-        margin-bottom: 8px;
-    }
-
-    .chapter-card {
-        background: #1a1d24;
-        border: 1px solid #2a2d35;
-        border-radius: 8px;
-        padding: 16px 20px;
-        margin-bottom: 10px;
-        cursor: pointer;
-        transition: border-color 0.2s;
-    }
-
-    .chapter-card:hover { border-color: #d4a843; }
+    .badge { display: inline-block; background: #1a1d24; border: 1px solid #d4a843; color: #d4a843; font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: 2px; padding: 4px 14px; border-radius: 2px; text-transform: uppercase; margin-bottom: 8px; }
+    .chapter-card { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; }
     .chapter-card.done { border-color: #2d5a3d; background: #151c19; }
-
     .ch-num { font-family: 'DM Mono', monospace; font-size: 10px; color: #5a5a6a; letter-spacing: 1px; text-transform: uppercase; }
     .ch-title { font-size: 16px; font-weight: 700; color: #e0d8c8; margin-top: 2px; }
     .ch-score { font-family: 'DM Mono', monospace; font-size: 11px; color: #4a9a5a; margin-top: 4px; }
-
-    .question-box {
-        background: #1a1d24;
-        border: 1px solid #2a2d35;
-        border-radius: 8px;
-        padding: 24px 28px;
-        margin-bottom: 20px;
-    }
-
+    .preload-badge { font-family: 'DM Mono', monospace; font-size: 10px; color: #d4a843; margin-top: 3px; }
+    .question-box { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 24px 28px; margin-bottom: 20px; }
     .q-label { font-family: 'DM Mono', monospace; font-size: 10px; color: #d4a843; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px; }
-    .q-text  { font-size: 20px; font-weight: 700; color: #f0e8d8; line-height: 1.55; }
-
-    .explanation-box {
-        border-radius: 6px;
-        padding: 16px 20px;
-        margin-top: 16px;
-        margin-bottom: 10px;
-        border-left: 3px solid;
-    }
+    .q-text { font-size: 20px; font-weight: 700; color: #f0e8d8; line-height: 1.55; }
+    .explanation-box { border-radius: 6px; padding: 16px 20px; margin-top: 16px; margin-bottom: 10px; border-left: 3px solid; }
     .explanation-box.correct { background: #151c19; border-color: #4a9a5a; }
-    .explanation-box.wrong   { background: #1c1515; border-color: #9a3a3a; }
-
+    .explanation-box.wrong { background: #1c1515; border-color: #9a3a3a; }
     .exp-label { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 8px; }
     .exp-label.correct { color: #4a9a5a; }
-    .exp-label.wrong   { color: #9a3a3a; }
-    .exp-text  { font-size: 15px; color: #b8b0a0; line-height: 1.65; }
-
-    .stat-box {
-        background: #1a1d24;
-        border: 1px solid #2a2d35;
-        border-radius: 6px;
-        padding: 14px 18px;
-        text-align: center;
-    }
-    .stat-val   { font-size: 28px; font-weight: 700; color: #d4a843; }
+    .exp-label.wrong { color: #9a3a3a; }
+    .exp-text { font-size: 15px; color: #b8b0a0; line-height: 1.65; }
+    .stat-box { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 6px; padding: 14px 18px; text-align: center; }
+    .stat-val { font-size: 28px; font-weight: 700; color: #d4a843; }
     .stat-label { font-family: 'DM Mono', monospace; font-size: 10px; color: #5a5a6a; letter-spacing: 1px; text-transform: uppercase; margin-top: 4px; }
-
-    .history-row {
-        background: #1a1d24;
-        border: 1px solid #2a2d35;
-        border-radius: 6px;
-        padding: 14px 20px;
-        margin-bottom: 8px;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-
-    .review-q {
-        background: #1a1d24;
-        border: 1px solid #2a2d35;
-        border-radius: 8px;
-        padding: 20px 24px;
-        margin-bottom: 14px;
-    }
+    .review-q { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 20px 24px; margin-bottom: 14px; }
     .review-q.correct { border-left: 4px solid #4a9a5a; }
-    .review-q.wrong   { border-left: 4px solid #9a3a3a; }
-
+    .review-q.wrong { border-left: 4px solid #9a3a3a; }
     .option-line { padding: 6px 0; font-size: 15px; color: #b8b0a0; }
     .option-line.correct-ans { color: #6aba7a; font-weight: 600; }
-    .option-line.wrong-ans   { color: #ca6a6a; text-decoration: line-through; }
-
-    .stButton > button {
-        background: #1a1d24 !important;
-        border: 1px solid #d4a843 !important;
-        color: #d4a843 !important;
-        font-family: 'DM Mono', monospace !important;
-        font-size: 12px !important;
-        letter-spacing: 1.5px !important;
-        border-radius: 5px !important;
-        padding: 10px 24px !important;
-        transition: all 0.2s !important;
-    }
-    .stButton > button:hover {
-        background: #d4a843 !important;
-        color: #0d0f14 !important;
-    }
-
+    .option-line.wrong-ans { color: #ca6a6a; text-decoration: line-through; }
+    .stButton > button { background: #1a1d24 !important; border: 1px solid #d4a843 !important; color: #d4a843 !important; font-family: 'DM Mono', monospace !important; font-size: 12px !important; letter-spacing: 1.5px !important; border-radius: 5px !important; padding: 10px 24px !important; transition: all 0.2s !important; }
+    .stButton > button:hover { background: #d4a843 !important; color: #0d0f14 !important; }
     .stRadio > div { gap: 8px !important; }
-    .stRadio label {
-        background: #1a1d24 !important;
-        border: 1px solid #2a2d35 !important;
-        border-radius: 6px !important;
-        padding: 12px 16px !important;
-        color: #c8c0b0 !important;
-        font-size: 16px !important;
-        cursor: pointer !important;
-        transition: border-color 0.15s !important;
-        width: 100% !important;
-    }
+    .stRadio label { background: #1a1d24 !important; border: 1px solid #2a2d35 !important; border-radius: 6px !important; padding: 12px 16px !important; color: #c8c0b0 !important; font-size: 16px !important; cursor: pointer !important; width: 100% !important; }
     .stRadio label:hover { border-color: #d4a843 !important; }
-
-    .stTextInput input {
-        background: #1a1d24 !important;
-        border: 1px solid #2a2d35 !important;
-        color: #e0d8c8 !important;
-        border-radius: 5px !important;
-        font-family: 'DM Mono', monospace !important;
-        font-size: 13px !important;
-    }
-
-    .stSelectbox select, [data-baseweb="select"] {
-        background: #1a1d24 !important;
-        color: #e0d8c8 !important;
-        border-color: #2a2d35 !important;
-    }
-
-    [data-testid="stSidebar"] {
-        background: #111318 !important;
-        border-right: 1px solid #2a2d35 !important;
-    }
-
+    .stTextInput input { background: #1a1d24 !important; border: 1px solid #2a2d35 !important; color: #e0d8c8 !important; border-radius: 5px !important; font-family: 'DM Mono', monospace !important; font-size: 13px !important; }
+    [data-testid="stSidebar"] { background: #111318 !important; border-right: 1px solid #2a2d35 !important; }
     .stProgress > div > div { background: #d4a843 !important; }
-
     hr { border-color: #2a2d35 !important; }
-
     .stMarkdown p { color: #c8c0b0; font-size: 15px; line-height: 1.65; }
-
-    div[data-testid="metric-container"] {
-        background: #1a1d24;
-        border: 1px solid #2a2d35;
-        border-radius: 8px;
-        padding: 14px;
-    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -400,8 +435,8 @@ def page_home():
     st.markdown("---")
 
     stats = get_chapter_stats()
-    total_score   = sum(v["score"] for v in stats.values())
-    total_q       = sum(v["total"] for v in stats.values())
+    total_score = sum(v["score"] for v in stats.values())
+    total_q = sum(v["total"] for v in stats.values())
     total_sessions = sum(v["attempts"] for v in stats.values())
 
     if total_sessions > 0:
@@ -416,6 +451,7 @@ def page_home():
         st.markdown("")
 
     st.markdown("### Select a Chapter")
+    api_key = st.session_state.get("api_key", "")
 
     for ch in CHAPTERS:
         ch_stat = stats.get(ch["id"])
@@ -425,11 +461,20 @@ def page_home():
             pct = round((ch_stat["score"] / ch_stat["total"]) * 100)
             score_html = f'<div class="ch-score">{pct_color(pct)} Best: {ch_stat["score"]}/{ch_stat["total"]} ({pct}%) · {ch_stat["attempts"]} attempt(s)</div>'
 
+        # Kick off background preload for Q1 of this chapter
+        pk = preload_key(ch["id"], 1)
+        if api_key:
+            start_preload(ch, [], pk)
+
+        preloaded = st.session_state.get(pk)
+        preload_html = '<div class="preload-badge">⚡ Ready — loads instantly</div>' if preloaded else ""
+
         st.markdown(f"""
         <div class="chapter-card {done_class}">
             <div class="ch-num">Chapter {ch['id']}</div>
             <div class="ch-title">{ch['emoji']} {ch['title']}</div>
             {score_html}
+            {preload_html}
         </div>
         """, unsafe_allow_html=True)
 
@@ -447,7 +492,6 @@ def page_quiz():
         st.session_state.page = "home"
         st.rerun()
 
-    # Init session state
     if "q_num" not in st.session_state:
         st.session_state.q_num = 1
         st.session_state.score = 0
@@ -457,7 +501,6 @@ def page_quiz():
         st.session_state.session_qs = []
         st.session_state.session_done = False
 
-    # Back button
     col_back, col_title = st.columns([1, 5])
     with col_back:
         if st.button("← Back"):
@@ -467,26 +510,19 @@ def page_quiz():
     with col_title:
         st.markdown(f"### {chapter['emoji']} {chapter['title']}")
 
-    # Session complete
     if st.session_state.session_done:
         final_score = st.session_state.score
         pct = round((final_score / QUESTIONS_PER_SESSION) * 100)
         st.markdown("---")
         st.markdown(f'<div class="stat-box"><div class="stat-val">{final_score}/{QUESTIONS_PER_SESSION}</div><div class="stat-label">Chapter {cid} Complete — {pct}%</div></div>', unsafe_allow_html=True)
         st.markdown("")
-
-        if pct == 100:
-            st.success("🎯 Perfect score! Excellent preparation.")
-        elif pct >= 80:
-            st.success("Very strong performance. Keep it up!")
-        elif pct >= 60:
-            st.warning("Good effort. Review the missed questions.")
-        else:
-            st.error("Needs more revision on this chapter.")
-
+        if pct == 100: st.success("🎯 Perfect score! Excellent preparation.")
+        elif pct >= 80: st.success("Very strong performance. Keep it up!")
+        elif pct >= 60: st.warning("Good effort. Review the missed questions.")
+        else: st.error("Needs more revision on this chapter.")
         c1, c2, c3 = st.columns(3)
         with c1:
-            if st.button("🔄 Retry Chapter"):
+            if st.button("🔄 Retry"):
                 reset_quiz()
                 st.session_state.quiz_chapter = cid
                 st.session_state.page = "quiz"
@@ -497,32 +533,44 @@ def page_quiz():
                 st.session_state.page = "home"
                 st.rerun()
         with c3:
-            if st.button("📊 View History"):
+            if st.button("📊 History"):
                 reset_quiz()
                 st.session_state.page = "history"
                 st.rerun()
         return
 
-    # Progress
     q_num = st.session_state.q_num
     score = st.session_state.score
     st.progress(((q_num - 1) / QUESTIONS_PER_SESSION))
     st.markdown(f'<p style="font-family:\'DM Mono\',monospace;font-size:11px;color:#5a5a6a;letter-spacing:1px;">QUESTION {q_num} / {QUESTIONS_PER_SESSION} &nbsp;·&nbsp; SCORE {score}</p>', unsafe_allow_html=True)
 
-    # Generate question if needed
+    # Use preloaded question if available, otherwise fetch
     if st.session_state.current_q is None:
-        with st.spinner("Generating question from workbook..."):
-            prev_topics = [q["topic"] for q in st.session_state.session_qs]
-            q = generate_question(chapter, prev_topics)
-            if q is None:
-                return
-            st.session_state.current_q = q
+        pk = preload_key(cid, q_num)
+        preloaded = st.session_state.get(pk)
+        if preloaded:
+            st.session_state.current_q = preloaded
+            del st.session_state[pk]
             st.session_state.selected = None
             st.session_state.answered = False
+        else:
+            with st.spinner("Generating question..."):
+                prev_topics = [q["topic"] for q in st.session_state.session_qs]
+                q_data = generate_question(chapter, prev_topics)
+                if q_data is None:
+                    return
+                st.session_state.current_q = q_data
+                st.session_state.selected = None
+                st.session_state.answered = False
 
     q = st.session_state.current_q
 
-    # Question box
+    # Preload next question in background while user reads/answers current one
+    if q_num < QUESTIONS_PER_SESSION:
+        next_pk = preload_key(cid, q_num + 1)
+        prev_topics = [sq["topic"] for sq in st.session_state.session_qs] + [q["topic"]]
+        start_preload(chapter, prev_topics, next_pk)
+
     st.markdown(f"""
     <div class="question-box">
         <div class="q-label">Question {q_num}</div>
@@ -530,7 +578,6 @@ def page_quiz():
     </div>
     """, unsafe_allow_html=True)
 
-    # Options
     option_labels = [f"{chr(65+i)}. {opt}" for i, opt in enumerate(q["options"])]
 
     if not st.session_state.answered:
@@ -540,11 +587,8 @@ def page_quiz():
         if st.button("Submit Answer →"):
             st.session_state.selected = selected_idx
             st.session_state.answered = True
-            is_correct = selected_idx == q["correctIndex"]
-            if is_correct:
+            if selected_idx == q["correctIndex"]:
                 st.session_state.score += 1
-
-            # Save question to session
             st.session_state.session_qs.append({
                 "question": q["question"],
                 "options": q["options"],
@@ -553,15 +597,11 @@ def page_quiz():
                 "explanation": q["explanation"],
                 "topic": q["topic"]
             })
-
-            # If last question, save to DB
             if q_num >= QUESTIONS_PER_SESSION:
                 save_session(cid, st.session_state.score, QUESTIONS_PER_SESSION, st.session_state.session_qs)
                 st.session_state.session_done = True
-
             st.rerun()
     else:
-        # Show answered state
         sel = st.session_state.selected
         correct = q["correctIndex"]
         is_correct = sel == correct
@@ -574,7 +614,6 @@ def page_quiz():
             else:
                 st.markdown(f'<div class="option-line">&nbsp;&nbsp;{chr(65+i)}. {opt}</div>', unsafe_allow_html=True)
 
-        # Explanation
         cls = "correct" if is_correct else "wrong"
         label = "✓ Correct!" if is_correct else "✗ Incorrect"
         st.markdown(f"""
@@ -583,6 +622,11 @@ def page_quiz():
             <div class="exp-text">{q['explanation']}</div>
         </div>
         """, unsafe_allow_html=True)
+
+        if q_num < QUESTIONS_PER_SESSION:
+            next_pk = preload_key(cid, q_num + 1)
+            if st.session_state.get(next_pk):
+                st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:10px;color:#d4a843">⚡ Next question ready</p>', unsafe_allow_html=True)
 
         btn_label = "See Results →" if q_num >= QUESTIONS_PER_SESSION else "Next Question →"
         if st.button(btn_label):
@@ -612,38 +656,43 @@ def page_history():
     st.markdown(f"**{len(sessions)} total session(s) across {len(stats)} chapter(s)**")
     st.markdown("")
 
-    # Chapter filter
-    chapter_options = ["All Chapters"] + [f"Chapter {c['id']}: {c['title']}" for c in CHAPTERS]
+    chapter_options = ["All Chapters"] + [f"Ch {c['id']} — {c['title']}" for c in CHAPTERS]
     filter_ch = st.selectbox("Filter by chapter:", chapter_options)
     filter_id = None
     if filter_ch != "All Chapters":
-        filter_id = int(filter_ch.split(":")[0].replace("Chapter ", "").strip())
+        try:
+            filter_id = int(filter_ch.split("—")[0].replace("Ch", "").strip())
+        except Exception:
+            filter_id = None
 
     st.markdown("")
 
     for sess in sessions:
-        sid, ch_id, score, total, date = sess
-        if filter_id and ch_id != filter_id:
+        try:
+            sid, ch_id, score, total, date = sess
+            if filter_id and ch_id != filter_id:
+                continue
+            chapter = get_chapter_by_id(ch_id)
+            pct = round((score / total) * 100) if total else 0
+            icon = pct_color(pct)
+            ch_name = chapter["title"] if chapter else f"Chapter {ch_id}"
+
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                st.markdown(f"""
+                **{icon} Ch {ch_id}: {ch_name}** &nbsp;·&nbsp;
+                <span style="color:#d4a843;font-family:'DM Mono',monospace;font-size:13px">{score}/{total} ({pct}%)</span> &nbsp;·&nbsp;
+                <span style="color:#5a5a6a;font-family:'DM Mono',monospace;font-size:11px">{date}</span>
+                """, unsafe_allow_html=True)
+            with col2:
+                if st.button("Review", key=f"review_{sid}"):
+                    st.session_state.review_session_id = sid
+                    st.session_state.page = "review"
+                    st.rerun()
+
+            st.markdown('<hr style="margin:8px 0;border-color:#1a1d24">', unsafe_allow_html=True)
+        except Exception:
             continue
-        chapter = get_chapter_by_id(ch_id)
-        pct = round((score / total) * 100)
-        icon = pct_color(pct)
-        ch_name = chapter["title"] if chapter else f"Chapter {ch_id}"
-
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.markdown(f"""
-            **{icon} Ch {ch_id}: {ch_name}** &nbsp;·&nbsp; 
-            <span style="color:#d4a843;font-family:'DM Mono',monospace;font-size:13px">{score}/{total} ({pct}%)</span> &nbsp;·&nbsp;
-            <span style="color:#5a5a6a;font-family:'DM Mono',monospace;font-size:11px">{date}</span>
-            """, unsafe_allow_html=True)
-        with col2:
-            if st.button("Review", key=f"review_{sid}"):
-                st.session_state.review_session_id = sid
-                st.session_state.page = "review"
-                st.rerun()
-
-        st.markdown('<hr style="margin:8px 0;border-color:#1a1d24">', unsafe_allow_html=True)
 
 
 def page_review():
@@ -652,61 +701,78 @@ def page_review():
         st.session_state.page = "history"
         st.rerun()
 
-    # Get session info
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT chapter, score, total, date FROM sessions WHERE id=?", (sid,))
-    sess = cur.fetchone()
-    con.close()
+    try:
+        con = sqlite3.connect(DB_PATH)
+        cur = con.cursor()
+        cur.execute("SELECT chapter, score, total, date FROM sessions WHERE id=?", (sid,))
+        sess = cur.fetchone()
+        con.close()
+    except Exception:
+        st.session_state.page = "history"
+        st.rerun()
+        return
 
     if not sess:
         st.session_state.page = "history"
         st.rerun()
+        return
 
     ch_id, score, total, date = sess
     chapter = get_chapter_by_id(ch_id)
-    pct = round((score / total) * 100)
+    pct = round((score / total) * 100) if total else 0
 
-    if st.button("← Back to History"):
-        st.session_state.page = "history"
-        st.rerun()
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        if st.button("← Back to History"):
+            st.session_state.page = "history"
+            st.rerun()
+    with col2:
+        txt = build_txt_content(sid)
+        fname = f"NISM_Ch{ch_id}_{date.replace(' ','_').replace(',','').replace(':','')}.txt"
+        st.download_button(label="💾 Save as TXT", data=txt, file_name=fname, mime="text/plain")
 
     st.markdown(f"## 🔖 Review — {chapter['emoji']} {chapter['title']}")
     st.markdown(f'<p style="font-family:\'DM Mono\',monospace;font-size:12px;color:#5a5a6a">{date} &nbsp;·&nbsp; Score: {score}/{total} ({pct}%) &nbsp;·&nbsp; {pct_color(pct)}</p>', unsafe_allow_html=True)
     st.markdown("---")
 
     rows = get_session_questions(sid)
+    if not rows:
+        st.warning("No questions found for this session.")
+        return
+
     for i, row in enumerate(rows, 1):
-        question, options_json, correct_idx, selected_idx, explanation, topic, is_correct = row
-        options = json.loads(options_json)
-        cls = "correct" if is_correct else "wrong"
-        result_icon = "✓" if is_correct else "✗"
+        try:
+            question, options_json, correct_idx, selected_idx, explanation, topic, is_correct = row
+            options = json.loads(options_json)
+            cls = "correct" if is_correct else "wrong"
 
-        st.markdown(f"""
-        <div class="review-q {cls}">
-            <div class="q-label">Q{i} &nbsp;·&nbsp; {topic} &nbsp;·&nbsp; {'✓ Correct' if is_correct else '✗ Incorrect'}</div>
-            <div class="q-text" style="font-size:17px;margin-bottom:14px">{question}</div>
-        """, unsafe_allow_html=True)
+            st.markdown(f"""
+            <div class="review-q {cls}">
+                <div class="q-label">Q{i} &nbsp;·&nbsp; {topic} &nbsp;·&nbsp; {'✓ Correct' if is_correct else '✗ Incorrect'}</div>
+                <div class="q-text" style="font-size:17px;margin-bottom:14px">{question}</div>
+            """, unsafe_allow_html=True)
 
-        for j, opt in enumerate(options):
-            if j == correct_idx and j == selected_idx:
-                st.markdown(f'<div class="option-line correct-ans">✓ {chr(65+j)}. {opt} ← Your answer (Correct)</div>', unsafe_allow_html=True)
-            elif j == correct_idx:
-                st.markdown(f'<div class="option-line correct-ans">✓ {chr(65+j)}. {opt} ← Correct answer</div>', unsafe_allow_html=True)
-            elif j == selected_idx:
-                st.markdown(f'<div class="option-line wrong-ans">✗ {chr(65+j)}. {opt} ← Your answer</div>', unsafe_allow_html=True)
-            else:
-                st.markdown(f'<div class="option-line">&nbsp;&nbsp;{chr(65+j)}. {opt}</div>', unsafe_allow_html=True)
+            for j, opt in enumerate(options):
+                if j == correct_idx and j == selected_idx:
+                    st.markdown(f'<div class="option-line correct-ans">✓ {chr(65+j)}. {opt} ← Your answer (Correct)</div>', unsafe_allow_html=True)
+                elif j == correct_idx:
+                    st.markdown(f'<div class="option-line correct-ans">✓ {chr(65+j)}. {opt} ← Correct answer</div>', unsafe_allow_html=True)
+                elif j == selected_idx:
+                    st.markdown(f'<div class="option-line wrong-ans">✗ {chr(65+j)}. {opt} ← Your answer</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="option-line">&nbsp;&nbsp;{chr(65+j)}. {opt}</div>', unsafe_allow_html=True)
 
-        exp_cls = "correct" if is_correct else "wrong"
-        st.markdown(f"""
-            <div class="explanation-box {exp_cls}" style="margin-top:12px">
-                <div class="exp-label {exp_cls}">📝 Explanation</div>
-                <div class="exp-text">{explanation}</div>
+            exp_cls = "correct" if is_correct else "wrong"
+            st.markdown(f"""
+                <div class="explanation-box {exp_cls}" style="margin-top:12px">
+                    <div class="exp-label {exp_cls}">📝 Explanation</div>
+                    <div class="exp-text">{explanation}</div>
+                </div>
             </div>
-        </div>
-        """, unsafe_allow_html=True)
-        st.markdown("")
+            """, unsafe_allow_html=True)
+            st.markdown("")
+        except Exception:
+            continue
 
 
 # ─────────────────────────────────────────────
@@ -730,7 +796,7 @@ def sidebar():
             st.markdown("""
             <div style="background:#1e2010;border:1px solid #4a6a1a;border-radius:5px;padding:10px 12px;font-size:12px;color:#8aba4a;font-family:'DM Mono',monospace;line-height:1.7">
             🔑 Get free API key:<br>
-            1. Go to aistudio.google.com<br>
+            1. aistudio.google.com<br>
             2. Sign in with Google<br>
             3. Click "Get API Key"<br>
             4. Paste it above
@@ -757,12 +823,19 @@ def sidebar():
         <div style="font-family:'DM Mono',monospace;font-size:10px;color:#3a3d45;line-height:1.8">
         100 MCQs · 2 hours<br>
         50% passing score<br>
-        No negative marking<br>
-        <br>
+        No negative marking<br><br>
         Data saved locally in<br>
         <code style="color:#d4a843">nism_quiz_results.db</code>
         </div>
         """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        # Workbook status
+        wb = load_workbook()
+        if wb:
+            st.markdown('<div style="color:#4a9a5a;font-family:\'DM Mono\',monospace;font-size:11px">📘 Workbook loaded<br>Questions from actual text</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div style="color:#9a6a2a;font-family:\'DM Mono\',monospace;font-size:11px">⚠️ workbook.txt missing<br>Upload to GitHub repo<br>for workbook-based Qs</div>', unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────
@@ -783,7 +856,7 @@ def main():
     if "page" not in st.session_state:
         st.session_state.page = "home"
     if "api_key" not in st.session_state:
-        st.session_state.api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        st.session_state.api_key = os.environ.get("GEMINI_API_KEY", "")
 
     sidebar()
 
