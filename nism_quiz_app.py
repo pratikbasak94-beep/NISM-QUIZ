@@ -182,7 +182,7 @@ Respond ONLY with valid JSON (no markdown, no backticks):
 
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(prompt)
         text = response.text.strip()
         text = text.replace("```json", "").replace("```", "").strip()
