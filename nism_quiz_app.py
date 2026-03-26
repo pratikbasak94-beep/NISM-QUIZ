@@ -1,6 +1,6 @@
 """
-NISM Series V-A — Mock Quiz App
-Requirements: pip install streamlit google-generativeai
+NISM Series V-A — Mock Quiz & PDF Notes App
+Requirements: pip install streamlit google-generativeai fpdf2
 Run: streamlit run nism_quiz_app.py
 """
 
@@ -9,8 +9,14 @@ import sqlite3
 import json
 import os
 import threading
-import time  # Required for API cooldowns
+import time
 from datetime import datetime
+
+# Import the PDF engine
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
 
 try:
     import google.generativeai as genai
@@ -23,7 +29,6 @@ except ImportError:
 DB_PATH = "nism_quiz_results.db"
 QUESTIONS_PER_SESSION = 5
 
-# FIXED: Added 2.5 Flash-Lite as the #1 default for the highest API limits!
 GEMINI_MODELS = [
     {"label": "Gemini 2.5 Flash Lite (Fastest & Highest Limits)", "id": "gemini-2.5-flash-lite"},
     {"label": "Gemini 2.5 Flash (Smarter & Fast)",                "id": "gemini-2.5-flash"},
@@ -55,6 +60,67 @@ CHAPTERS = [
     {"id": 11, "title": "Mutual Fund Scheme Performance",           "emoji": "🎯",
      "topics": "benchmarks and their importance, Price Return Index (PRI) vs Total Return Index (TRI), SEBI mandate for TRI benchmarks, choosing appropriate benchmark, benchmarks for equity schemes (Nifty 50 TRI, BSE Sensex TRI, Nifty Midcap 150 TRI), benchmarks for debt schemes (CRISIL indices, Nifty indices), benchmarks for hybrid and other schemes, quantitative measures of fund manager performance (alpha, information ratio, Jensen alpha), tracking error definition and calculation, tracking error importance for index funds and ETFs, scheme performance disclosure rules"},
 ]
+
+# ─────────────────────────────────────────────
+# PDF GENERATOR CLASS
+# ─────────────────────────────────────────────
+if FPDF:
+    class StyledPDF(FPDF):
+        def header(self):
+            # Premium Branding Header
+            self.set_font("helvetica", "B", 10)
+            self.set_text_color(100, 100, 100)
+            self.cell(0, 10, "BFSI Academy - Smart Revision Notes", align="R")
+            self.ln(15)
+
+        def footer(self):
+            # Page Numbers
+            self.set_y(-15)
+            self.set_font("helvetica", "I", 8)
+            self.set_text_color(150, 150, 150)
+            self.cell(0, 10, f"Page {self.page_no()}", align="C")
+
+def create_pdf_bytes(markdown_text):
+    """Converts Gemini text to PDF and returns raw bytes for Streamlit to download."""
+    if not FPDF:
+        return None
+        
+    pdf = StyledPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    
+    # Split text by lines to process markdown
+    lines = markdown_text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        
+        # To prevent font errors with special symbols (like ₹), we ensure clean encoding
+        line = line.encode('latin-1', 'replace').decode('latin-1')
+
+        if not line:
+            pdf.ln(5)
+            continue
+            
+        if line.startswith("#"):
+            clean_text = line.replace("#", "").strip()
+            pdf.set_font("helvetica", "B", 16)
+            pdf.set_text_color(0, 51, 102) # Dark Blue headers
+            pdf.multi_cell(0, 10, clean_text)
+            pdf.ln(2)
+        elif line.startswith("-") or line.startswith("*"):
+            clean_text = line[1:].replace("**", "").strip()
+            pdf.set_font("helvetica", "", 12)
+            pdf.set_text_color(0, 0, 0)
+            pdf.multi_cell(0, 8, f"?  {clean_text}") # Using ? as a safe bullet point for basic fonts
+        else:
+            clean_text = line.replace("**", "")
+            pdf.set_font("helvetica", "", 12)
+            pdf.set_text_color(40, 40, 40)
+            pdf.multi_cell(0, 7, clean_text)
+            
+    # Return the file as a stream of bytes
+    return bytes(pdf.output())
 
 # ─────────────────────────────────────────────
 # DATABASE
@@ -208,7 +274,7 @@ def get_chapter_text(chapter_id, max_chars=4000):
     return chapter_text.strip()
 
 # ─────────────────────────────────────────────
-# API — Google Gemini
+# API — Google Gemini (For Quizzes)
 # ─────────────────────────────────────────────
 def _build_prompt(chapter, previous_topics):
     prev_str = ""
@@ -235,10 +301,8 @@ Key topic areas: {chapter['topics']}"""
 Requirements:
 - Question must test real exam-worthy knowledge from the chapter
 - 4 options (A, B, C, D) — exactly one correct answer
-- Options should be plausible but clearly distinguishable
-- Include a clear explanation (2-3 sentences) of why the correct answer is right, and briefly why the others are wrong if relevant
+- Include a clear explanation (2-3 sentences)
 - Cover a DIFFERENT specific topic/sub-topic each time
-- Make questions practical and application-based, not just definitions
 
 Respond ONLY with valid JSON (no markdown, no backticks):
 {{
@@ -246,11 +310,10 @@ Respond ONLY with valid JSON (no markdown, no backticks):
   "options": ["option A text", "option B text", "option C text", "option D text"],
   "correctIndex": 0,
   "explanation": "explanation text here",
-  "topic": "brief topic tag e.g. NAV calculation"
+  "topic": "brief topic tag"
 }}"""
 
-def _call_gemini(api_key, prompt):
-    """Try selected model first, auto-fallback through others on rate limit."""
+def _call_gemini_json(api_key, prompt):
     genai.configure(api_key=api_key)
 
     selected_id = st.session_state.get("selected_model", GEMINI_MODELS[0]["id"])
@@ -263,7 +326,6 @@ def _call_gemini(api_key, prompt):
             model = genai.GenerativeModel(m["id"])
             response = model.generate_content(prompt)
             
-            # FIXED: Robust JSON extraction in case Gemini adds markdown formatting
             text = response.text.strip()
             if text.startswith("```"):
                 text = text.split("\n", 1)[-1]
@@ -279,10 +341,9 @@ def _call_gemini(api_key, prompt):
             
         except Exception as e:
             err = str(e).lower()
-            # FIXED: Improved error catching and added a cooldown before switching models
             if "429" in err or "quota" in err or "rate" in err or "exhausted" in err:
                 last_error = f"{m['label']}: rate limited"
-                time.sleep(2) # Give the API a 2-second cooldown to avoid chaining blocks
+                time.sleep(2)
                 continue
             else:
                 raise e
@@ -292,13 +353,9 @@ def _call_gemini(api_key, prompt):
 def generate_question(chapter, previous_topics):
     api_key = st.session_state.get("api_key", "")
     if not api_key:
-        st.error("⚠️ Please enter your Gemini API key in the sidebar.")
-        return None
-    if genai is None:
-        st.error("⚠️ Package missing. Run: pip install google-generativeai")
         return None
     try:
-        return _call_gemini(api_key, _build_prompt(chapter, previous_topics))
+        return _call_gemini_json(api_key, _build_prompt(chapter, previous_topics))
     except Exception as e:
         st.error(f"Error generating question: {e}")
         return None
@@ -307,7 +364,7 @@ def _preload_bg(api_key, chapter, previous_topics, store_key):
     if not api_key or genai is None:
         return
     try:
-        result = _call_gemini(api_key, _build_prompt(chapter, previous_topics))
+        result = _call_gemini_json(api_key, _build_prompt(chapter, previous_topics))
         st.session_state[store_key] = result
     except Exception:
         pass
@@ -328,114 +385,59 @@ def preload_key(ch_id, q_num):
     return f"preload_ch{ch_id}_q{q_num}"
 
 # ─────────────────────────────────────────────
-# DOWNLOAD HELPER
+# API — Google Gemini (For Notes Generation)
 # ─────────────────────────────────────────────
-def build_txt_content(session_id):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT chapter, score, total, date FROM sessions WHERE id=?", (session_id,))
-    sess = cur.fetchone()
-    con.close()
-    if not sess:
-        return ""
+def _build_notes_prompt(chapter):
+    workbook_text = get_chapter_text(chapter["id"], max_chars=6000)
+    if workbook_text:
+        context_section = f"""
+Use the following ACTUAL TEXT from the NISM Series V-A workbook:
 
-    ch_id, score, total, date = sess
-    chapter = get_chapter_by_id(ch_id)
-    rows = get_session_questions(session_id)
+--- WORKBOOK EXCERPT (Chapter {chapter['id']}) ---
+{workbook_text}
+--- END EXCERPT ---"""
+    else:
+        context_section = f"\nKey topics to cover: {chapter['topics']}"
 
-    lines = []
-    lines.append("=" * 60)
-    lines.append("NISM Series V-A — Mock Quiz Results")
-    lines.append("=" * 60)
-    lines.append(f"Chapter : {ch_id}. {chapter['title']}")
-    lines.append(f"Date    : {date}")
-    lines.append(f"Score   : {score}/{total} ({round((score/total)*100)}%)")
-    lines.append("=" * 60)
-    lines.append("")
+    return f"""You are an expert BFSI instructor preparing students for the NISM Series V-A exam.
+Create highly effective, concise revision notes for Chapter {chapter['id']}: "{chapter['title']}".
+{context_section}
 
-    for i, row in enumerate(rows, 1):
-        question, options_json, correct_idx, selected_idx, explanation, topic, is_correct = row
-        options = json.loads(options_json)
-        result = "CORRECT" if is_correct else "INCORRECT"
-        lines.append(f"Q{i}. [{topic}] — {result}")
-        lines.append(question)
-        lines.append("")
-        for j, opt in enumerate(options):
-            if j == correct_idx and j == selected_idx:
-                prefix = "YOUR ANSWER (CORRECT) ->"
-            elif j == correct_idx:
-                prefix = "CORRECT ANSWER         ->"
-            elif j == selected_idx:
-                prefix = "YOUR ANSWER (WRONG)    ->"
+Requirements for the notes:
+- Use clear bullet points (-) and sub-headings (#).
+- Bold (**) the most important terms, rules, and formulas.
+- Specifically highlight any SEBI regulations, time limits, or tax slabs.
+- Keep it structured and easy to read. Do not output JSON.
+"""
+
+def generate_chapter_notes(chapter):
+    api_key = st.session_state.get("api_key", "")
+    if not api_key:
+        st.error("⚠️ Please enter your Gemini API key in the sidebar.")
+        return None
+        
+    genai.configure(api_key=api_key)
+    selected_id = st.session_state.get("selected_model", GEMINI_MODELS[0]["id"])
+    
+    ordered = [m for m in GEMINI_MODELS if m["id"] == selected_id]
+    ordered += [m for m in GEMINI_MODELS if m["id"] != selected_id]
+
+    for m in ordered:
+        try:
+            model = genai.GenerativeModel(m["id"])
+            response = model.generate_content(_build_notes_prompt(chapter))
+            return response.text
+        except Exception as e:
+            err = str(e).lower()
+            if "429" in err or "quota" in err or "rate" in err or "exhausted" in err:
+                time.sleep(2)
+                continue
             else:
-                prefix = "                        "
-            lines.append(f"  {chr(65+j)}. {prefix} {opt}")
-        lines.append("")
-        lines.append(f"Explanation: {explanation}")
-        lines.append("")
-        lines.append("-" * 60)
-        lines.append("")
-
-    return "\n".join(lines)
-
-# ─────────────────────────────────────────────
-# STYLING
-# ─────────────────────────────────────────────
-def inject_pwa():
-    st.markdown("""
-    <link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiTklTTSBWLUEgUXVpeiIsInNob3J0X25hbWUiOiJOSVNNIFF1aXoiLCJzdGFydF91cmwiOiIvIiwiZGlzcGxheSI6InN0YW5kYWxvbmUiLCJiYWNrZ3JvdW5kX2NvbG9yIjoiIzBkMGYxNCIsInRoZW1lX2NvbG9yIjoiI2Q0YTg0MyIsImRlc2NyaXB0aW9uIjoiTklTTSBTZXJpZXMgVi1BIE1vY2sgUXVpeiIsImljb25zIjpbeyJzcmMiOiJodHRwczovL2Ntcy5tYXRoLnVuaS1mcmFua2Z1cnQuZGUvaWNvbnMvZmF2aWNvbi5pY28iLCJzaXplcyI6IjI1NngyNTYiLCJ0eXBlIjoiaW1hZ2UveC1pY29uIn1dfQ==">
-    <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="NISM Quiz">
-    <meta name="theme-color" content="#d4a843">
-    """, unsafe_allow_html=True)
-
-def inject_css():
-    st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&family=DM+Mono:wght@400;500&display=swap');
-    html, body, [class*="css"] { font-family: 'Crimson Pro', Georgia, serif; }
-    .stApp { background-color: #0d0f14; }
-    h1, h2, h3 { color: #f0e8d8 !important; font-family: 'Crimson Pro', serif !important; }
-    .badge { display: inline-block; background: #1a1d24; border: 1px solid #d4a843; color: #d4a843; font-family: 'DM Mono', monospace; font-size: 11px; letter-spacing: 2px; padding: 4px 14px; border-radius: 2px; text-transform: uppercase; margin-bottom: 8px; }
-    .chapter-card { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; }
-    .chapter-card.done { border-color: #2d5a3d; background: #151c19; }
-    .ch-num { font-family: 'DM Mono', monospace; font-size: 10px; color: #5a5a6a; letter-spacing: 1px; text-transform: uppercase; }
-    .ch-title { font-size: 16px; font-weight: 700; color: #e0d8c8; margin-top: 2px; }
-    .ch-score { font-family: 'DM Mono', monospace; font-size: 11px; color: #4a9a5a; margin-top: 4px; }
-    .preload-badge { font-family: 'DM Mono', monospace; font-size: 10px; color: #d4a843; margin-top: 3px; }
-    .question-box { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 24px 28px; margin-bottom: 20px; }
-    .q-label { font-family: 'DM Mono', monospace; font-size: 10px; color: #d4a843; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px; }
-    .q-text { font-size: 20px; font-weight: 700; color: #f0e8d8; line-height: 1.55; }
-    .explanation-box { border-radius: 6px; padding: 16px 20px; margin-top: 16px; margin-bottom: 10px; border-left: 3px solid; }
-    .explanation-box.correct { background: #151c19; border-color: #4a9a5a; }
-    .explanation-box.wrong { background: #1c1515; border-color: #9a3a3a; }
-    .exp-label { font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 8px; }
-    .exp-label.correct { color: #4a9a5a; }
-    .exp-label.wrong { color: #9a3a3a; }
-    .exp-text { font-size: 15px; color: #b8b0a0; line-height: 1.65; }
-    .stat-box { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 6px; padding: 14px 18px; text-align: center; }
-    .stat-val { font-size: 28px; font-weight: 700; color: #d4a843; }
-    .stat-label { font-family: 'DM Mono', monospace; font-size: 10px; color: #5a5a6a; letter-spacing: 1px; text-transform: uppercase; margin-top: 4px; }
-    .review-q { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 20px 24px; margin-bottom: 14px; }
-    .review-q.correct { border-left: 4px solid #4a9a5a; }
-    .review-q.wrong { border-left: 4px solid #9a3a3a; }
-    .option-line { padding: 6px 0; font-size: 15px; color: #b8b0a0; }
-    .option-line.correct-ans { color: #6aba7a; font-weight: 600; }
-    .option-line.wrong-ans { color: #ca6a6a; text-decoration: line-through; }
-    .stButton > button { background: #1a1d24 !important; border: 1px solid #d4a843 !important; color: #d4a843 !important; font-family: 'DM Mono', monospace !important; font-size: 12px !important; letter-spacing: 1.5px !important; border-radius: 5px !important; padding: 10px 24px !important; transition: all 0.2s !important; }
-    .stButton > button:hover { background: #d4a843 !important; color: #0d0f14 !important; }
-    .stRadio > div { gap: 8px !important; }
-    .stRadio label { background: #1a1d24 !important; border: 1px solid #2a2d35 !important; border-radius: 6px !important; padding: 12px 16px !important; color: #c8c0b0 !important; font-size: 16px !important; cursor: pointer !important; width: 100% !important; }
-    .stRadio label:hover { border-color: #d4a843 !important; }
-    .stTextInput input { background: #1a1d24 !important; border: 1px solid #2a2d35 !important; color: #e0d8c8 !important; border-radius: 5px !important; font-family: 'DM Mono', monospace !important; font-size: 13px !important; }
-    [data-testid="stSidebar"] { background: #111318 !important; border-right: 1px solid #2a2d35 !important; }
-    .stProgress > div > div { background: #d4a843 !important; }
-    hr { border-color: #2a2d35 !important; }
-    .stMarkdown p { color: #c8c0b0; font-size: 15px; line-height: 1.65; }
-    </style>
-    """, unsafe_allow_html=True)
+                st.error(f"Error generating notes: {e}")
+                return None
+                
+    st.error("All AI models hit rate limits. Please wait a minute and try again.")
+    return None
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -458,7 +460,6 @@ def reset_quiz():
 # PAGES
 # ─────────────────────────────────────────────
 def page_home():
-    st.markdown('<div class="badge">NISM Series V-A</div>', unsafe_allow_html=True)
     st.markdown("## Mutual Fund Distributors — Mock Quiz")
     st.markdown("*5 questions per chapter · No negative marking · 50% to pass*")
     st.markdown("---")
@@ -489,9 +490,6 @@ def page_home():
             pct = round((ch_stat["score"] / ch_stat["total"]) * 100)
             score_html = f'<div class="ch-score">{pct_color(pct)} Best: {ch_stat["score"]}/{ch_stat["total"]} ({pct}%) · {ch_stat["attempts"]} attempt(s)</div>'
 
-        # FIXED: Removed the mass preload feature from the home page loop. 
-        # This was the exact cause of the 429 Resource Exhausted errors.
-        
         st.markdown(f"""
         <div class="chapter-card {done_class}">
             <div class="ch-num">Chapter {ch['id']}</div>
@@ -505,7 +503,6 @@ def page_home():
             st.session_state.quiz_chapter = ch["id"]
             st.session_state.page = "quiz"
             st.rerun()
-
 
 def page_quiz():
     cid = st.session_state.get("quiz_chapter")
@@ -564,7 +561,6 @@ def page_quiz():
     q_num = st.session_state.q_num
     score = st.session_state.score
     st.progress(((q_num - 1) / QUESTIONS_PER_SESSION))
-    st.markdown(f'<p style="font-family:\'DM Mono\',monospace;font-size:11px;color:#5a5a6a;letter-spacing:1px;">QUESTION {q_num} / {QUESTIONS_PER_SESSION} &nbsp;·&nbsp; SCORE {score}</p>', unsafe_allow_html=True)
 
     if st.session_state.current_q is None:
         pk = preload_key(cid, q_num)
@@ -586,7 +582,6 @@ def page_quiz():
 
     q = st.session_state.current_q
 
-    # The safe preload: It only generates Q2 while you are reading Q1.
     if q_num < QUESTIONS_PER_SESSION:
         next_pk = preload_key(cid, q_num + 1)
         prev_topics = [sq["topic"] for sq in st.session_state.session_qs] + [q["topic"]]
@@ -618,9 +613,6 @@ def page_quiz():
                 "explanation": q["explanation"],
                 "topic": q["topic"]
             })
-            if q_num >= QUESTIONS_PER_SESSION:
-                save_session(cid, st.session_state.score, QUESTIONS_PER_SESSION, st.session_state.session_qs)
-                st.session_state.session_done = True
             st.rerun()
     else:
         sel = st.session_state.selected
@@ -644,208 +636,129 @@ def page_quiz():
         </div>
         """, unsafe_allow_html=True)
 
-        if q_num < QUESTIONS_PER_SESSION:
-            next_pk = preload_key(cid, q_num + 1)
-            if st.session_state.get(next_pk):
-                st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:10px;color:#d4a843">⚡ Next question ready</p>', unsafe_allow_html=True)
-
         btn_label = "See Results →" if q_num >= QUESTIONS_PER_SESSION else "Next Question →"
+        
+        # ✅ Final save and quiz completion triggered here on button click
         if st.button(btn_label):
             if q_num < QUESTIONS_PER_SESSION:
                 st.session_state.q_num += 1
                 st.session_state.current_q = None
                 st.rerun()
             else:
+                save_session(cid, st.session_state.score, QUESTIONS_PER_SESSION, st.session_state.session_qs)
                 st.session_state.session_done = True
                 st.rerun()
+
+
+# ─────────────────────────────────────────────
+# PDF STUDY NOTES GENERATOR PAGE
+# ─────────────────────────────────────────────
+def page_notes():
+    st.markdown("## 📝 PDF Study Notes Generator")
+    st.markdown("*Use Gemini to instantly summarize textbook chapters into a beautifully formatted PDF.*")
+    st.markdown("---")
+
+    if not FPDF:
+        st.error("⚠️ The 'fpdf2' library is missing. Please run `pip install fpdf2` in your terminal to enable PDF downloads.")
+        return
+
+    chapter_options = [f"Chapter {c['id']} — {c['title']}" for c in CHAPTERS]
+    selected_ch_str = st.selectbox("Select Chapter to Summarize:", chapter_options)
+    ch_id = int(selected_ch_str.split("—")[0].replace("Chapter", "").strip())
+    chapter = get_chapter_by_id(ch_id)
+
+    if st.button("✨ Generate PDF Notes"):
+        with st.spinner(f"Reading Chapter {ch_id} and designing PDF... This takes about 10 seconds."):
+            notes_text = generate_chapter_notes(chapter)
+            
+            if notes_text:
+                st.session_state.current_notes = notes_text
+                st.session_state.notes_chapter_id = ch_id
+                
+                # Instantly convert the text to PDF bytes behind the scenes
+                st.session_state.notes_pdf_bytes = create_pdf_bytes(notes_text)
+            
+    # Display the PDF Download Button if generated
+    if "current_notes" in st.session_state and "notes_pdf_bytes" in st.session_state:
+        st.success("✅ Premium PDF Generated Successfully!")
+        
+        # Format the filename
+        date_str = datetime.now().strftime("%Y%m%d")
+        fname = f"NISM_Academy_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
+        
+        # Streamlit's Download Button now serves the pure PDF data
+        st.download_button(
+            label="📄 Download Premium PDF", 
+            data=st.session_state.notes_pdf_bytes, 
+            file_name=fname, 
+            mime="application/pdf"
+        )
+        
+        # Show a quick preview of the text on the screen
+        st.markdown(f"""
+        <div class="question-box">
+            <div class="q-label">Notes Preview</div>
+            <div class="exp-text">{st.session_state.current_notes}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 def page_history():
     st.markdown("## 📊 Exam History")
     st.markdown("---")
-
     if st.button("← Back to Chapters"):
         st.session_state.page = "home"
         st.rerun()
 
     sessions = get_all_sessions()
     if not sessions:
-        st.info("No exam sessions saved yet. Complete a chapter quiz to see your history here.")
+        st.info("No exam sessions saved yet.")
         return
-
-    stats = get_chapter_stats()
-    st.markdown(f"**{len(sessions)} total session(s) across {len(stats)} chapter(s)**")
-    st.markdown("")
-
-    chapter_options = ["All Chapters"] + [f"Ch {c['id']} — {c['title']}" for c in CHAPTERS]
-    filter_ch = st.selectbox("Filter by chapter:", chapter_options)
-    filter_id = None
-    if filter_ch != "All Chapters":
-        try:
-            filter_id = int(filter_ch.split("—")[0].replace("Ch", "").strip())
-        except Exception:
-            filter_id = None
-
-    st.markdown("")
 
     for sess in sessions:
         try:
             sid, ch_id, score, total, date = sess
-            if filter_id and ch_id != filter_id:
-                continue
             chapter = get_chapter_by_id(ch_id)
             pct = round((score / total) * 100) if total else 0
             icon = pct_color(pct)
             ch_name = chapter["title"] if chapter else f"Chapter {ch_id}"
 
-            col1, col2 = st.columns([4, 1])
-            with col1:
-                st.markdown(f"""
-                **{icon} Ch {ch_id}: {ch_name}** &nbsp;·&nbsp;
-                <span style="color:#d4a843;font-family:'DM Mono',monospace;font-size:13px">{score}/{total} ({pct}%)</span> &nbsp;·&nbsp;
-                <span style="color:#5a5a6a;font-family:'DM Mono',monospace;font-size:11px">{date}</span>
-                """, unsafe_allow_html=True)
-            with col2:
-                if st.button("Review", key=f"review_{sid}"):
-                    st.session_state.review_session_id = sid
-                    st.session_state.page = "review"
-                    st.rerun()
-
+            st.markdown(f"**{icon} Ch {ch_id}: {ch_name}** &nbsp;·&nbsp; {score}/{total} ({pct}%) &nbsp;·&nbsp; {date}")
             st.markdown('<hr style="margin:8px 0;border-color:#1a1d24">', unsafe_allow_html=True)
         except Exception:
             continue
-
-
-def page_review():
-    sid = st.session_state.get("review_session_id")
-    if not sid:
-        st.session_state.page = "history"
-        st.rerun()
-
-    try:
-        con = sqlite3.connect(DB_PATH)
-        cur = con.cursor()
-        cur.execute("SELECT chapter, score, total, date FROM sessions WHERE id=?", (sid,))
-        sess = cur.fetchone()
-        con.close()
-    except Exception:
-        st.session_state.page = "history"
-        st.rerun()
-        return
-
-    if not sess:
-        st.session_state.page = "history"
-        st.rerun()
-        return
-
-    ch_id, score, total, date = sess
-    chapter = get_chapter_by_id(ch_id)
-    pct = round((score / total) * 100) if total else 0
-
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        if st.button("← Back to History"):
-            st.session_state.page = "history"
-            st.rerun()
-    with col2:
-        txt = build_txt_content(sid)
-        fname = f"NISM_Ch{ch_id}_{date.replace(' ','_').replace(',','').replace(':','')}.txt"
-        st.download_button(label="💾 Save as TXT", data=txt, file_name=fname, mime="text/plain")
-
-    st.markdown(f"## 🔖 Review — {chapter['emoji']} {chapter['title']}")
-    st.markdown(f'<p style="font-family:\'DM Mono\',monospace;font-size:12px;color:#5a5a6a">{date} &nbsp;·&nbsp; Score: {score}/{total} ({pct}%) &nbsp;·&nbsp; {pct_color(pct)}</p>', unsafe_allow_html=True)
-    st.markdown("---")
-
-    rows = get_session_questions(sid)
-    if not rows:
-        st.warning("No questions found for this session.")
-        return
-
-    for i, row in enumerate(rows, 1):
-        try:
-            question, options_json, correct_idx, selected_idx, explanation, topic, is_correct = row
-            options = json.loads(options_json)
-            cls = "correct" if is_correct else "wrong"
-
-            st.markdown(f"""
-            <div class="review-q {cls}">
-                <div class="q-label">Q{i} &nbsp;·&nbsp; {topic} &nbsp;·&nbsp; {'✓ Correct' if is_correct else '✗ Incorrect'}</div>
-                <div class="q-text" style="font-size:17px;margin-bottom:14px">{question}</div>
-            """, unsafe_allow_html=True)
-
-            for j, opt in enumerate(options):
-                if j == correct_idx and j == selected_idx:
-                    st.markdown(f'<div class="option-line correct-ans">✓ {chr(65+j)}. {opt} ← Your answer (Correct)</div>', unsafe_allow_html=True)
-                elif j == correct_idx:
-                    st.markdown(f'<div class="option-line correct-ans">✓ {chr(65+j)}. {opt} ← Correct answer</div>', unsafe_allow_html=True)
-                elif j == selected_idx:
-                    st.markdown(f'<div class="option-line wrong-ans">✗ {chr(65+j)}. {opt} ← Your answer</div>', unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="option-line">&nbsp;&nbsp;{chr(65+j)}. {opt}</div>', unsafe_allow_html=True)
-
-            exp_cls = "correct" if is_correct else "wrong"
-            st.markdown(f"""
-                <div class="explanation-box {exp_cls}" style="margin-top:12px">
-                    <div class="exp-label {exp_cls}">📝 Explanation</div>
-                    <div class="exp-text">{explanation}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            st.markdown("")
-        except Exception:
-            continue
-
 
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
 def sidebar():
     with st.sidebar:
-        st.markdown('<div class="badge">NISM V-A</div>', unsafe_allow_html=True)
         st.markdown("### Settings")
         st.markdown("---")
 
         api_key = st.text_input(
             "Gemini API Key",
             value=st.session_state.get("api_key", ""),
-            type="password",
-            help="Free key from aistudio.google.com — no card needed"
+            type="password"
         )
         st.session_state.api_key = api_key
 
-        if not api_key:
-            st.markdown("""
-            <div style="background:#1e2010;border:1px solid #4a6a1a;border-radius:5px;padding:10px 12px;font-size:12px;color:#8aba4a;font-family:'DM Mono',monospace;line-height:1.7">
-            🔑 Get free API key:<br>
-            1. aistudio.google.com<br>
-            2. Sign in with Google<br>
-            3. Click "Get API Key"<br>
-            4. Paste it above
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="color:#4a9a5a;font-family:\'DM Mono\',monospace;font-size:11px">✓ API key set</div>', unsafe_allow_html=True)
-
         st.markdown("---")
-        st.markdown("**Model**")
         model_labels = [m["label"] for m in GEMINI_MODELS]
         current_id = st.session_state.get("selected_model", GEMINI_MODELS[0]["id"])
         current_idx = next((i for i, m in enumerate(GEMINI_MODELS) if m["id"] == current_id), 0)
-        chosen = st.selectbox("Gemini Model", model_labels, index=current_idx, label_visibility="collapsed")
-        chosen_id = next(m["id"] for m in GEMINI_MODELS if m["label"] == chosen)
-        st.session_state.selected_model = chosen_id
-        st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:10px;color:#5a5a6a">Auto-fallback enabled if rate limited</div>', unsafe_allow_html=True)
-
-        fallback = st.session_state.get("active_model_used")
-        if fallback:
-            st.markdown(f'<div style="color:#d4a843;font-family:\'DM Mono\',monospace;font-size:10px">⚡ Used fallback: {fallback}</div>', unsafe_allow_html=True)
+        chosen = st.selectbox("Gemini Model", model_labels, index=current_idx)
+        st.session_state.selected_model = next(m["id"] for m in GEMINI_MODELS if m["label"] == chosen)
 
         st.markdown("---")
-        st.markdown("**Navigation**")
-
         if st.button("🏠 Home", use_container_width=True):
             reset_quiz()
             st.session_state.page = "home"
+            st.rerun()
+
+        if st.button("📝 PDF Notes Generator", use_container_width=True):
+            reset_quiz()
+            st.session_state.page = "notes"
             st.rerun()
 
         if st.button("📊 History", use_container_width=True):
@@ -853,37 +766,32 @@ def sidebar():
             st.session_state.page = "history"
             st.rerun()
 
-        st.markdown("---")
-        st.markdown("""
-        <div style="font-family:'DM Mono',monospace;font-size:10px;color:#3a3d45;line-height:1.8">
-        100 MCQs · 2 hours<br>
-        50% passing score<br>
-        No negative marking<br><br>
-        Data saved locally in<br>
-        <code style="color:#d4a843">nism_quiz_results.db</code>
-        </div>
-        """, unsafe_allow_html=True)
-
-        st.markdown("---")
-        wb = load_workbook()
-        if wb:
-            st.markdown('<div style="color:#4a9a5a;font-family:\'DM Mono\',monospace;font-size:11px">📘 Workbook loaded<br>Questions from actual text</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div style="color:#9a6a2a;font-family:\'DM Mono\',monospace;font-size:11px">⚠️ workbook.txt missing<br>Upload to GitHub repo<br>for workbook-based Qs</div>', unsafe_allow_html=True)
+def inject_css():
+    st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Crimson+Pro:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Crimson Pro', Georgia, serif; }
+    .stApp { background-color: #0d0f14; }
+    h1, h2, h3 { color: #f0e8d8 !important; font-family: 'Crimson Pro', serif !important; }
+    .chapter-card { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 16px 20px; margin-bottom: 10px; }
+    .ch-title { font-size: 16px; font-weight: 700; color: #e0d8c8; margin-top: 2px; }
+    .question-box { background: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 24px 28px; margin-bottom: 20px; }
+    .q-text { font-size: 20px; font-weight: 700; color: #f0e8d8; line-height: 1.55; }
+    .explanation-box { border-radius: 6px; padding: 16px 20px; margin-top: 16px; margin-bottom: 10px; border-left: 3px solid; }
+    .explanation-box.correct { background: #151c19; border-color: #4a9a5a; }
+    .explanation-box.wrong { background: #1c1515; border-color: #9a3a3a; }
+    .exp-text { font-size: 15px; color: #b8b0a0; line-height: 1.65; }
+    .stButton > button { background: #1a1d24 !important; border: 1px solid #d4a843 !important; color: #d4a843 !important; border-radius: 5px !important; }
+    .stButton > button:hover { background: #d4a843 !important; color: #0d0f14 !important; }
+    </style>
+    """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────
 def main():
-    st.set_page_config(
-        page_title="NISM V-A Mock Quiz",
-        page_icon="📘",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-
+    st.set_page_config(page_title="NISM Mock Quiz & Notes", page_icon="📘", layout="wide")
     init_db()
-    inject_pwa()
     inject_css()
 
     if "page" not in st.session_state:
@@ -893,15 +801,14 @@ def main():
 
     sidebar()
 
-    page = st.session_state.page
-    if page == "home":
+    if st.session_state.page == "home":
         page_home()
-    elif page == "quiz":
+    elif st.session_state.page == "quiz":
         page_quiz()
-    elif page == "history":
+    elif st.session_state.page == "history":
         page_history()
-    elif page == "review":
-        page_review()
+    elif st.session_state.page == "notes":
+        page_notes()
 
 if __name__ == "__main__":
     main()
