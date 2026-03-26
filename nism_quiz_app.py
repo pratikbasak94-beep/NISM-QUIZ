@@ -66,7 +66,7 @@ class StyledPDF(FPDF):
     def header(self):
         self.set_font("helvetica", "B", 10)
         self.set_text_color(100, 100, 100)
-        self.cell(0, 10, "BFSI Academy - Smart Revision Notes", align="R")
+        self.cell(0, 10, "BFSI Academy - Detailed Study Notes", align="R")
         self.ln(15)
 
     def footer(self):
@@ -84,7 +84,6 @@ def create_pdf_bytes(markdown_text):
     
     for line in lines:
         line = line.strip()
-        # FIX: Strip out invisible non-breaking spaces that crash FPDF
         line = line.replace('\xa0', ' ').replace('\t', ' ')
         line = line.encode('latin-1', 'replace').decode('latin-1')
 
@@ -92,7 +91,6 @@ def create_pdf_bytes(markdown_text):
             pdf.ln(5)
             continue
             
-        # FIX: Shock Absorber (try/except) so one bad string doesn't crash the app
         try:
             if line.startswith("#"):
                 clean_text = line.replace("#", "").strip()
@@ -104,14 +102,13 @@ def create_pdf_bytes(markdown_text):
                 clean_text = line[1:].replace("**", "").strip()
                 pdf.set_font("helvetica", "", 12)
                 pdf.set_text_color(0, 0, 0)
-                pdf.multi_cell(0, 8, f"-  {clean_text}") # Replaced '?' with standard '-' bullet
+                pdf.multi_cell(0, 8, f"-  {clean_text}") 
             else:
                 clean_text = line.replace("**", "")
                 pdf.set_font("helvetica", "", 12)
                 pdf.set_text_color(40, 40, 40)
                 pdf.multi_cell(0, 7, clean_text)
         except Exception:
-            # If line is totally unbreakable, silently skip it to protect the PDF
             pass
             
     return bytes(pdf.output())
@@ -158,7 +155,6 @@ def build_exam_pdf_content(session_id):
         options = json.loads(options_json)
         result_text = "CORRECT" if is_correct else "INCORRECT"
 
-        # FIX: Clean strings before PDF rendering
         question = question.replace('\xa0', ' ').encode('latin-1', 'replace').decode('latin-1')
         explanation = explanation.replace('\xa0', ' ').encode('latin-1', 'replace').decode('latin-1')
         topic = topic.replace('\xa0', ' ').encode('latin-1', 'replace').decode('latin-1')
@@ -201,7 +197,6 @@ def build_exam_pdf_content(session_id):
             pdf.multi_cell(0, 6, f"Explanation: {explanation}")
             pdf.ln(10)
         except Exception:
-            # Skip corrupted blocks
             pdf.write(8, "[Error formatting this specific question block]\n\n")
 
     return bytes(pdf.output())
@@ -304,54 +299,6 @@ def get_chapter_stats():
     except Exception:
         return {}
 
-def build_txt_content(session_id):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT chapter, score, total, date FROM sessions WHERE id=?", (session_id,))
-    sess = cur.fetchone()
-    con.close()
-    if not sess:
-        return ""
-
-    ch_id, score, total, date = sess
-    chapter = get_chapter_by_id(ch_id)
-    rows = get_session_questions(session_id)
-
-    lines = []
-    lines.append("=" * 60)
-    lines.append("NISM Series V-A — Mock Quiz Results")
-    lines.append("=" * 60)
-    lines.append(f"Chapter : {ch_id}. {chapter['title']}")
-    lines.append(f"Date    : {date}")
-    lines.append(f"Score   : {score}/{total} ({round((score/total)*100)}%)")
-    lines.append("=" * 60)
-    lines.append("")
-
-    for i, row in enumerate(rows, 1):
-        question, options_json, correct_idx, selected_idx, explanation, topic, is_correct = row
-        options = json.loads(options_json)
-        result = "CORRECT" if is_correct else "INCORRECT"
-        lines.append(f"Q{i}. [{topic}] — {result}")
-        lines.append(question)
-        lines.append("")
-        for j, opt in enumerate(options):
-            if j == correct_idx and j == selected_idx:
-                prefix = "YOUR ANSWER (CORRECT) ->"
-            elif j == correct_idx:
-                prefix = "CORRECT ANSWER         ->"
-            elif j == selected_idx:
-                prefix = "YOUR ANSWER (WRONG)    ->"
-            else:
-                prefix = "                        "
-            lines.append(f"  {chr(65+j)}. {prefix} {opt}")
-        lines.append("")
-        lines.append(f"Explanation: {explanation}")
-        lines.append("")
-        lines.append("-" * 60)
-        lines.append("")
-
-    return "\n".join(lines)
-
 # ─────────────────────────────────────────────
 # WORKBOOK LOADER
 # ─────────────────────────────────────────────
@@ -381,7 +328,7 @@ def load_workbook():
     except Exception:
         return None
 
-def get_chapter_text(chapter_id, max_chars=4000):
+def get_chapter_text(chapter_id, max_chars=12000): # 🛠️ INCREASED: Reads way more text now!
     workbook = load_workbook()
     if not workbook:
         return None
@@ -394,9 +341,9 @@ def get_chapter_text(chapter_id, max_chars=4000):
 
     if next_marker:
         end = upper_wb.find(next_marker, start + 100)
-        chapter_text = workbook[start:end] if end != -1 else workbook[start:start + 15000]
+        chapter_text = workbook[start:end] if end != -1 else workbook[start:start + 25000]
     else:
-        chapter_text = workbook[start:start + 15000]
+        chapter_text = workbook[start:start + 25000]
 
     if len(chapter_text) > max_chars:
         chapter_text = chapter_text[500:500 + max_chars]
@@ -410,7 +357,7 @@ def _build_prompt(chapter, previous_topics, is_special=False):
     if previous_topics:
         prev_str = f"\n\nAVOID repeating these topics already covered this session:\n{', '.join(previous_topics)}"
 
-    workbook_text = get_chapter_text(chapter["id"])
+    workbook_text = get_chapter_text(chapter["id"], max_chars=4000)
     if workbook_text:
         context_section = f"""
 Use the following ACTUAL TEXT from the NISM Series V-A workbook (November 2025 edition) to base your question on:
@@ -507,8 +454,11 @@ def start_preload(chapter, previous_topics, store_key, is_special=False):
 def preload_key(ch_id, q_num):
     return f"preload_ch{ch_id}_q{q_num}"
 
+# ─────────────────────────────────────────────
+# 🛠️ NEW: DEEP STUDY NOTES PROMPT
+# ─────────────────────────────────────────────
 def _build_notes_prompt(chapter):
-    workbook_text = get_chapter_text(chapter["id"], max_chars=6000)
+    workbook_text = get_chapter_text(chapter["id"], max_chars=12000) # Give it way more context to read
     if workbook_text:
         context_section = f"""
 Use the following ACTUAL TEXT from the NISM Series V-A workbook:
@@ -518,14 +468,17 @@ Use the following ACTUAL TEXT from the NISM Series V-A workbook:
     else:
         context_section = f"\nKey topics to cover: {chapter['topics']}"
 
-    return f"""You are an expert BFSI instructor preparing students for the NISM Series V-A exam.
-Create highly effective, concise revision notes for Chapter {chapter['id']}: "{chapter['title']}".
+    return f"""You are an expert BFSI instructor preparing comprehensive, detailed STUDY MATERIAL for the NISM Series V-A exam.
+Create deep, explanatory study notes for Chapter {chapter['id']}: "{chapter['title']}".
 {context_section}
-Requirements for the notes:
-- Use clear bullet points (-) and sub-headings (#).
-- Bold (**) the most important terms, rules, and formulas.
-- Specifically highlight any SEBI regulations, time limits, or tax slabs.
-- Keep it structured and easy to read. Do not output JSON.
+
+CRITICAL REQUIREMENTS:
+- DO NOT create short revision summaries. You must explain the concepts deeply so a beginner can study and learn directly from this text.
+- DO NOT leave bullet points empty or just list topics.
+- You MUST extract and state every specific fact, tax rate (e.g., STCG 20%, LTCG 12.5%), SEBI regulation, and time limit mentioned in the text. Provide the context for each number.
+- Use clear sub-headings (#) and bullet points (-).
+- Bold (**) the most important terms, rules, and numbers.
+- Format strictly as readable text/markdown. Do NOT output JSON.
 """
 
 def generate_chapter_notes(chapter):
@@ -809,7 +762,7 @@ def page_quiz():
 
 def page_notes():
     st.markdown("## 📝 PDF Study Notes Generator")
-    st.markdown("*Use Gemini to instantly summarize textbook chapters into a beautifully formatted PDF.*")
+    st.markdown("*Use Gemini to deeply analyze textbook chapters into comprehensive, readable study material.*")
     st.markdown("---")
 
     chapter_options = [f"Chapter {c['id']} — {c['title']}" for c in CHAPTERS]
@@ -817,8 +770,8 @@ def page_notes():
     ch_id = int(selected_ch_str.split("—")[0].replace("Chapter", "").strip())
     chapter = get_chapter_by_id(ch_id)
 
-    if st.button("✨ Generate PDF Notes"):
-        with st.spinner(f"Reading Chapter {ch_id} and designing PDF... This takes about 10 seconds."):
+    if st.button("✨ Generate Study Notes"):
+        with st.spinner(f"Deeply analyzing Chapter {ch_id} and generating study material... This might take 15 seconds."):
             notes_text = generate_chapter_notes(chapter)
             
             if notes_text:
@@ -827,13 +780,13 @@ def page_notes():
                 st.session_state.notes_pdf_bytes = create_pdf_bytes(notes_text)
             
     if "current_notes" in st.session_state and "notes_pdf_bytes" in st.session_state:
-        st.success("✅ Premium PDF Generated Successfully!")
+        st.success("✅ Study Material Generated Successfully!")
         
         date_str = datetime.now().strftime("%Y%m%d")
-        fname = f"NISM_Academy_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
+        fname = f"NISM_Academy_Study_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
         
         st.download_button(
-            label="📄 Download Premium PDF", 
+            label="📄 Download Study Material (PDF)", 
             data=st.session_state.notes_pdf_bytes, 
             file_name=fname, 
             mime="application/pdf"
@@ -841,7 +794,7 @@ def page_notes():
         
         st.markdown(f"""
         <div class="question-box">
-            <div class="q-label">Notes Preview</div>
+            <div class="q-label">Study Notes Preview</div>
             <div class="exp-text">{st.session_state.current_notes}</div>
         </div>
         """, unsafe_allow_html=True)
