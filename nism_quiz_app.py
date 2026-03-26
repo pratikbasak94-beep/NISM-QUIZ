@@ -145,7 +145,6 @@ def build_exam_pdf_content(session_id, username):
     pdf.set_font("helvetica", "", 12)
     pdf.set_text_color(40, 40, 40)
     
-    # NEW: Prints the student's name on their PDF scorecard!
     pdf.multi_cell(0, 8, f"Student: {username.upper()}")
     pdf.multi_cell(0, 8, f"Chapter: {ch_id}. {chapter['title']}")
     pdf.multi_cell(0, 8, f"Date: {date}")
@@ -211,7 +210,6 @@ def init_db():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     
-    # Create tables if they don't exist
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -237,7 +235,6 @@ def init_db():
         )
     """)
     
-    # FIX: Upgrade old databases automatically so you don't lose data!
     cur.execute("PRAGMA table_info(sessions)")
     columns = [info[1] for info in cur.fetchall()]
     if "username" not in columns:
@@ -536,7 +533,6 @@ def reset_quiz():
 # ─────────────────────────────────────────────
 # PAGES
 # ─────────────────────────────────────────────
-# NEW: LOGIN PAGE
 def page_login():
     st.markdown("## 🔐 Welcome to BFSI Academy")
     st.markdown("Enter your Name or Access Code to track your progress and unlock Special Exams.")
@@ -561,7 +557,6 @@ def page_home():
     st.markdown("*10 questions per chapter · No negative marking*")
     st.markdown("---")
 
-    # Pass the username to only get YOUR stats
     stats = get_chapter_stats(username)
     total_score = sum(v["score"] for v in stats.values())
     total_q = sum(v["total"] for v in stats.values())
@@ -961,10 +956,10 @@ def page_review():
 # ─────────────────────────────────────────────
 def sidebar():
     with st.sidebar:
-        # NEW: Display Logged-in User Profile
         if "username" in st.session_state:
             st.markdown(f"👤 **Profile:** {st.session_state.username}")
-            if st.button("Logout", key="logout_btn", size="small"):
+            # 🛠️ FIX: Removed the unsupported size="small" parameter from the Logout button
+            if st.button("Logout", key="logout_btn"):
                 del st.session_state["username"]
                 st.session_state.page = "login"
                 st.rerun()
@@ -985,7 +980,6 @@ def sidebar():
         chosen = st.selectbox("Gemini Model", model_labels, index=current_idx)
         st.session_state.selected_model = next(m["id"] for m in GEMINI_MODELS if m["label"] == chosen)
 
-        # Hide navigation buttons if not logged in
         if "username" in st.session_state:
             st.markdown("---")
             if st.button("🏠 Home", use_container_width=True):
@@ -1041,7 +1035,6 @@ def main():
     if "api_key" not in st.session_state:
         st.session_state.api_key = os.environ.get("GEMINI_API_KEY", "")
 
-    # Force Login Screen if username is missing
     if "username" not in st.session_state:
         st.session_state.page = "login"
 
