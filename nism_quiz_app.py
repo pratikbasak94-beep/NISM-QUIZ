@@ -3,152 +3,162 @@ import google.generativeai as genai
 import json
 from fpdf import FPDF
 
-# --- 1. PAGE CONFIG & MOBILE BRANDING ---
-st.set_page_config(
-    page_title="NISM PREP PORTAL",
-    page_icon="🎓",
-    layout="wide"
+# --- 1. PAGE CONFIGURATION ---
+st.set_page_config(page_title="NISM PREP PORTAL", page_icon="🎓", layout="wide")
+
+# Hide Streamlit Branding
+st.markdown("<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>", unsafe_allow_html=True)
+
+# --- 2. SIDEBAR: SETTINGS & NAVIGATION ---
+st.sidebar.title("🛠️ Control Panel")
+
+# API KEY INPUT
+user_api_key = st.sidebar.text_input("Enter Gemini API Key:", type="password", help="Get yours at aistudio.google.com")
+
+# UPGRADED: NEXT-GEN AI MODEL SELECTOR
+model_choice = st.sidebar.selectbox(
+    "Select AI Engine:", 
+    ["1. Gemini 2.0 Flash Lite (Fastest)", "2. Gemini 2.5 Flash (Balanced)", "3. Gemini 2.5 Pro (Heavy/Fallback)"],
+    help="Start with 2.0 Flash Lite. Switch to 2.5 Pro for highly complex JSON quiz generation."
 )
 
-# Professional UI Styling
-st.markdown("""
-    <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-        justify-content: center;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        white-space: pre-wrap;
-        background-color: #f0f2f6;
-        border-radius: 10px 10px 0px 0px;
-        padding: 10px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Map the dropdown choices to the actual 2.x API backend strings
+model_map = {
+    "1. Gemini 2.0 Flash Lite (Fastest)": "gemini-2.0-flash-lite", 
+    "2. Gemini 2.5 Flash (Balanced)": "gemini-2.5-flash",
+    "3. Gemini 2.5 Pro (Heavy/Fallback)": "gemini-2.5-pro"
+}
+active_model_string = model_map[model_choice]
 
-# --- 2. INITIALIZE AI ---
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-model = genai.GenerativeModel('gemini-1.5-flash')
+st.sidebar.divider()
 
-# --- 3. SESSION STATE ---
-if "quiz_data" not in st.session_state: st.session_state.quiz_data = None
-if "exam_data" not in st.session_state: st.session_state.exam_data = None
-if "live_notes" not in st.session_state: st.session_state.live_notes = None
-if "pdf_bytes" not in st.session_state: st.session_state.pdf_bytes = None
+# NAVIGATION
+app_mode = st.sidebar.radio("Go To:", ["📖 Study Notes & PDF", "📝 Chapter Quiz", "🏆 30-Mark Exam"])
 
-# --- 4. DATA & SYLLABUS ---
+st.sidebar.divider()
+
+# SYLLABUS DATA
 full_chapters_va = [
-    "Chapter 1: Investment Landscape",
-    "Chapter 2: Concept and Role of a Mutual Fund",
-    "Chapter 3: Legal Structure of Mutual Funds in India",
-    "Chapter 4: Legal and Regulatory Framework",
-    "Chapter 5: Scheme Related Information Documents",
-    "Chapter 6: Fund Administration and Services",
+    "Chapter 1: Investment Landscape", "Chapter 2: Concept and Role of a Mutual Fund",
+    "Chapter 3: Legal Structure of Mutual Funds in India", "Chapter 4: Legal and Regulatory Framework",
+    "Chapter 5: Scheme Related Information Documents", "Chapter 6: Fund Administration and Services",
     "Chapter 7: Net Asset Value, Total Expense Ratio and Pricing of Units",
     "Chapter 8: Taxation, Adverse Selection and Prevention of Money Laundering",
-    "Chapter 9: Mutual Fund Products",
-    "Chapter 10: Investment Management",
-    "Chapter 11: Helping Investors with Financial Planning",
-    "Chapter 12: Helping Investors with Mutual Funds",
+    "Chapter 9: Mutual Fund Products", "Chapter 10: Investment Management",
+    "Chapter 11: Helping Investors with Financial Planning", "Chapter 12: Helping Investors with Mutual Funds",
     "Chapter 13: Recommending Suitable Schemes to Investors"
 ]
 
-# --- 5. HELPER FUNCTIONS ---
+# --- 3. SESSION STATE ---
+if "live_notes" not in st.session_state: st.session_state.live_notes = None
+if "pdf_bytes" not in st.session_state: st.session_state.pdf_bytes = None
+if "quiz_data" not in st.session_state: st.session_state.quiz_data = None
+if "exam_data" not in st.session_state: st.session_state.exam_data = None
 
-def generate_nism_notes(exam, chapter):
-    prompt = f"Expertly write NISM {exam} study notes for {chapter}. Use Markdown, clear headings, and bold key terms. Keep it exam-focused."
-    return model.generate_content(prompt).text
+# --- 4. CORE ENGINE (AI & PDF) ---
 
-def create_pdf_bytes(text_content):
+def get_ai_response(prompt, model_name):
+    """Generates AI content using the dynamically selected Next-Gen model."""
+    if not user_api_key:
+        st.error("⚠️ Please enter your API Key in the sidebar first!")
+        return None
+    try:
+        genai.configure(api_key=user_api_key)
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        st.error(f"❌ AI Error: {e}")
+        return None
+
+def create_pdf(text):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
     pdf.set_font("helvetica", size=12)
-    # Filter for PDF-safe characters
-    safe_text = text_content.encode('latin-1', 'replace').decode('latin-1')
+    safe_text = text.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 8, txt=safe_text)
     return bytes(pdf.output())
 
-def generate_quiz(exam, topic, num):
-    prompt = f"Generate {num} MCQs for {exam} on {topic} in RAW JSON format. Keys: question, options (list), answer (string), explanation."
-    res = model.generate_content(prompt)
-    try:
-        return json.loads(res.text.replace("```json", "").replace("```", "").strip())
-    except: return None
-
-# --- 6. MAIN APP INTERFACE ---
+# --- 5. MAIN INTERFACE ---
 
 st.title("🎓 NISM PREP PORTAL")
 
-# MOBILE FRIENDLY NAVIGATION (TABS INSTEAD OF SIDEBAR)
-tab1, tab2, tab3 = st.tabs(["📖 Study Notes", "📝 Chapter Quiz", "🏆 Full Exam"])
-
-# --- TAB 1: STUDY NOTES & PDF ---
-with tab1:
+# MODE 1: STUDY Notes & PDF
+if app_mode == "📖 Study Notes & PDF":
     st.subheader("Interactive Study Material")
-    chapter_choice = st.selectbox("Pick a Chapter to Study:", full_chapters_va, key="note_select")
+    chapter = st.selectbox("Select Chapter:", full_chapters_va)
     
-    col1, col2 = st.columns([1, 1])
+    col1, col2 = st.columns(2)
     with col1:
         if st.button("🚀 Generate Notes", use_container_width=True):
-            with st.spinner("AI writing..."):
-                st.session_state.live_notes = generate_nism_notes("Series V-A", chapter_choice)
-                st.session_state.pdf_bytes = None # Reset PDF until requested
+            with st.spinner(f"Drafting notes using {model_choice.split('(')[0].strip()}..."):
+                prompt = f"Write detailed NISM Series V-A exam notes for {chapter}. Focus on SEBI regulations, definitions, and key concepts. Use clear headings and bullet points. Do not use complex tables or special markdown dividers."
+                st.session_state.live_notes = get_ai_response(prompt, active_model_string)
+                st.session_state.pdf_bytes = None
     
     with col2:
         if st.session_state.live_notes:
-            if st.button("📄 Prepare PDF Download", use_container_width=True):
-                with st.spinner("Converting to PDF..."):
-                    st.session_state.pdf_bytes = create_pdf_bytes(st.session_state.live_notes)
+            if st.button("📄 Prepare Downloadable PDF", use_container_width=True):
+                st.session_state.pdf_bytes = create_pdf(st.session_state.live_notes)
+                st.success("PDF Ready!")
 
     if st.session_state.pdf_bytes:
-        st.download_button("📥 Click to Download PDF", st.session_state.pdf_bytes, f"{chapter_choice}.pdf", "application/pdf", use_container_width=True)
+        st.download_button("📥 Download PDF Now", st.session_state.pdf_bytes, f"{chapter}.pdf", "application/pdf", use_container_width=True)
 
     if st.session_state.live_notes:
         st.divider()
         st.markdown(st.session_state.live_notes)
 
-# --- TAB 2: CHAPTER QUIZ ---
-with tab2:
-    st.subheader("10-Question Practice")
-    quiz_chapter = st.selectbox("Select Chapter for Quiz:", full_chapters_va, key="quiz_select")
+# MODE 2: CHAPTER QUIZ
+elif app_mode == "📝 Chapter Quiz":
+    st.subheader("10-Question Knowledge Check")
+    quiz_ch = st.selectbox("Topic:", full_chapters_va)
     
     if st.button("Generate Quiz", use_container_width=True):
-        with st.spinner("Compiling questions..."):
-            st.session_state.quiz_data = generate_quiz("Series V-A", quiz_chapter, 10)
-    
+        with st.spinner(f"Creating MCQs using {model_choice.split('(')[0].strip()}..."):
+            prompt = f"Generate 10 MCQs for NISM V-A on {quiz_ch} in RAW JSON format. Keys must be exactly: question, options (list of 4 strings), answer (correct string), explanation."
+            raw_json = get_ai_response(prompt, active_model_string)
+            if raw_json:
+                try:
+                    st.session_state.quiz_data = json.loads(raw_json.replace("```json", "").replace("```", "").strip())
+                except json.JSONDecodeError:
+                    st.error(f"The AI returned badly formatted JSON. Try generating again, or switch to Gemini 2.5 Pro in the sidebar for stricter formatting.")
+
     if st.session_state.quiz_data:
         with st.form("quiz_form"):
-            user_ans = {}
+            u_ans = {}
             for i, q in enumerate(st.session_state.quiz_data):
                 st.write(f"**Q{i+1}: {q['question']}**")
-                user_ans[i] = st.radio("Options", q['options'], key=f"q{i}", label_visibility="collapsed")
-            if st.form_submit_button("Submit Quiz"):
-                score = sum([1 for i, q in enumerate(st.session_state.quiz_data) if user_ans[i] == q['answer']])
-                st.metric("Your Score", f"{score}/10")
+                u_ans[i] = st.radio("Options", q['options'], key=f"q{i}", label_visibility="collapsed")
+            if st.form_submit_button("Submit"):
+                score = sum([1 for i, q in enumerate(st.session_state.quiz_data) if u_ans[i] == q['answer']])
+                st.metric("Score", f"{score}/10")
                 for i, q in enumerate(st.session_state.quiz_data):
-                    if user_ans[i] == q['answer']: st.success(f"Q{i+1} Correct: {q['explanation']}")
-                    else: st.error(f"Q{i+1} Wrong. Correct: {q['answer']}. {q['explanation']}")
+                    if u_ans[i] == q['answer']: st.success(f"Q{i+1}: Correct! {q['explanation']}")
+                    else: st.error(f"Q{i+1}: Wrong. Answer: {q['answer']}. {q['explanation']}")
 
-# --- TAB 3: FULL EXAM ---
-with tab3:
-    st.subheader("30-Mark Final Simulation")
-    if st.button("Begin Final Exam", use_container_width=True):
-        with st.spinner("Generating unique 30-mark exam..."):
-            st.session_state.exam_data = generate_quiz("Series V-A", "Full Syllabus", 30)
-    
+# MODE 3: 30-MARK EXAM
+elif app_mode == "🏆 30-Mark Exam":
+    st.subheader("Full Mock Simulation")
+    if st.button("Generate 30-Mark Exam", use_container_width=True):
+        with st.spinner(f"Building final exam using {model_choice.split('(')[0].strip()}..."):
+            prompt = f"Generate 30 difficult MCQs for NISM Series V-A Full Syllabus in RAW JSON format. Keys: question, options, answer, explanation."
+            raw_ex = get_ai_response(prompt, active_model_string)
+            if raw_ex:
+                try:
+                    st.session_state.exam_data = json.loads(raw_ex.replace("```json", "").replace("```", "").strip())
+                except json.JSONDecodeError:
+                    st.error("JSON formatting error. Please try again or switch the model to Gemini 2.5 Pro.")
+
     if st.session_state.exam_data:
         with st.form("exam_form"):
-            user_ex = {}
+            e_ans = {}
             for i, q in enumerate(st.session_state.exam_data):
                 st.write(f"**Q{i+1}: {q['question']}**")
-                user_ex[i] = st.radio("Options", q['options'], key=f"ex{i}", label_visibility="collapsed")
-            if st.form_submit_button("Submit Exam"):
-                ex_score = sum([1 for i, q in enumerate(st.session_state.exam_data) if user_ex[i] == q['answer']])
-                st.metric("Final Score", f"{ex_score}/30")
-                if ex_score >= 15: st.success("Pass! Ready for SEBI.")
-                else: st.warning("Fail. Keep studying.")
+                e_ans[i] = st.radio("Options", q['options'], key=f"ex{i}", label_visibility="collapsed")
+            if st.form_submit_button("Finish Exam"):
+                final_score = sum([1 for i, q in enumerate(st.session_state.exam_data) if e_ans[i] == q['answer']])
+                st.metric("Final Result", f"{final_score}/30")
+                if final_score >= 15: st.success("🎉 You Passed!")
+                else: st.warning("📚 More practice needed.")
