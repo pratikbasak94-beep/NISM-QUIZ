@@ -788,8 +788,8 @@ def page_quiz():
                 st.rerun()
 
 def page_notes():
-    st.markdown("## 📝 PDF Study Notes Generator")
-    st.markdown("*Use Gemini to deeply analyze textbook chapters into comprehensive, readable study material.*")
+    st.markdown("## 📝 Live Study Notes Generator")
+    st.markdown("*Use Gemini to analyze textbook chapters and generate live study material.*")
     st.markdown("---")
 
     chapter_options = [f"Chapter {c['id']} — {c['title']}" for c in CHAPTERS]
@@ -797,32 +797,39 @@ def page_notes():
     ch_id = int(selected_ch_str.split("—")[0].replace("Chapter", "").strip())
     chapter = get_chapter_by_id(ch_id)
 
-    if st.button("✨ Generate Study Notes"):
-        with st.spinner(f"Deeply analyzing Chapter {ch_id} and generating study material... This might take 15 seconds."):
-            notes_text = generate_chapter_notes(chapter)
-            
-            if notes_text:
-                st.session_state.current_notes = notes_text
-                st.session_state.notes_chapter_id = ch_id
-                st.session_state.notes_pdf_bytes = create_pdf_bytes(notes_text)
-            
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        if st.button("✨ Generate Study Notes", use_container_width=True):
+            with st.spinner(f"Analyzing Chapter {ch_id}..."):
+                notes_text = generate_chapter_notes(chapter)
+                
+                if notes_text:
+                    st.session_state.current_notes = notes_text
+                    st.session_state.notes_chapter_id = ch_id
+                    st.session_state.notes_pdf_bytes = create_pdf_bytes(notes_text)
+                    st.rerun()
+
+    # The PDF download button appears once notes are generated
     if "current_notes" in st.session_state and "notes_pdf_bytes" in st.session_state:
-        st.success("✅ Study Material Generated Successfully!")
+        with col2:
+            st.success("✅ Notes ready for download.")
+            date_str = datetime.now().strftime("%Y%m%d")
+            fname = f"NISM_Study_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
+            
+            st.download_button(
+                label="📄 Download PDF", 
+                data=st.session_state.notes_pdf_bytes, 
+                file_name=fname, 
+                mime="application/pdf",
+                use_container_width=True
+            )
         
-        date_str = datetime.now().strftime("%Y%m%d")
-        fname = f"NISM_Academy_Study_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
-        
-        st.download_button(
-            label="📄 Download Study Material (PDF)", 
-            data=st.session_state.notes_pdf_bytes, 
-            file_name=fname, 
-            mime="application/pdf"
-        )
-        
+        st.markdown("---")
+        st.markdown(f"### Study Material: {chapter['title']}")
         st.markdown(f"""
-        <div class="question-box">
-            <div class="q-label">Study Notes Preview</div>
-            <div class="exp-text">{st.session_state.current_notes}</div>
+        <div style="background-color: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 25px; color: #f0e8d8;">
+            {st.session_state.current_notes}
         </div>
         """, unsafe_allow_html=True)
 
@@ -986,7 +993,7 @@ def sidebar():
                 st.session_state.page = "home"
                 st.rerun()
 
-            if st.button("📝 PDF Notes Generator", use_container_width=True):
+            if st.button("📝 Live Study Notes", use_container_width=True):
                 reset_quiz()
                 st.session_state.page = "notes"
                 st.rerun()
