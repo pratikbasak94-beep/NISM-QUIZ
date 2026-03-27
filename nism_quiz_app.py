@@ -6,7 +6,7 @@ from fpdf import FPDF
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(page_title="NISM PREP PORTAL", page_icon="🎓", layout="wide")
 
-# Hide Streamlit Branding
+# Hide Streamlit Branding for a clean SaaS look
 st.markdown("<style>#MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}</style>", unsafe_allow_html=True)
 
 # --- 2. SIDEBAR: SETTINGS & NAVIGATION ---
@@ -15,18 +15,18 @@ st.sidebar.title("🛠️ Control Panel")
 # API KEY INPUT
 user_api_key = st.sidebar.text_input("Enter Gemini API Key:", type="password", help="Get yours at aistudio.google.com")
 
-# UPGRADED: NEXT-GEN AI MODEL SELECTOR
+# STABLE FREE-TIER AI MODEL SELECTOR
 model_choice = st.sidebar.selectbox(
     "Select AI Engine:", 
-    ["1. Gemini 2.0 Flash Lite (Fastest)", "2. Gemini 2.5 Flash (Balanced)", "3. Gemini 2.5 Pro (Heavy/Fallback)"],
-    help="Start with 2.0 Flash Lite. Switch to 2.5 Pro for highly complex JSON quiz generation."
+    ["1. Gemini Flash 8B (Fastest/Lite)", "2. Gemini 1.5 Flash (Balanced)", "3. Gemini 1.5 Pro (Heavy/Fallback)"],
+    help="Using stable 1.5 models to guarantee free-tier API access without billing errors."
 )
 
-# Map the dropdown choices to the actual 2.x API backend strings
+# Map the dropdown choices to the actual guaranteed Free-Tier API strings
 model_map = {
-    "1. Gemini 2.0 Flash Lite (Fastest)": "gemini-2.0-flash-lite", 
-    "2. Gemini 2.5 Flash (Balanced)": "gemini-2.5-flash",
-    "3. Gemini 2.5 Pro (Heavy/Fallback)": "gemini-2.5-pro"
+    "1. Gemini Flash 8B (Fastest/Lite)": "gemini-1.5-flash-8b", 
+    "2. Gemini 1.5 Flash (Balanced)": "gemini-1.5-flash",
+    "3. Gemini 1.5 Pro (Heavy/Fallback)": "gemini-1.5-pro"
 }
 active_model_string = model_map[model_choice]
 
@@ -58,7 +58,7 @@ if "exam_data" not in st.session_state: st.session_state.exam_data = None
 # --- 4. CORE ENGINE (AI & PDF) ---
 
 def get_ai_response(prompt, model_name):
-    """Generates AI content using the dynamically selected Next-Gen model."""
+    """Generates AI content using the dynamically selected Free-Tier model."""
     if not user_api_key:
         st.error("⚠️ Please enter your API Key in the sidebar first!")
         return None
@@ -72,11 +72,15 @@ def get_ai_response(prompt, model_name):
         return None
 
 def create_pdf(text):
+    """Converts text to PDF safely."""
     pdf = FPDF()
     pdf.add_page()
     pdf.set_margins(15, 15, 15)
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("helvetica", size=12)
-    safe_text = text.encode('latin-1', 'replace').decode('latin-1')
+    # Strip problem characters and force safe encoding
+    safe_text = text.replace('---', '').replace('***', '')
+    safe_text = safe_text.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 8, txt=safe_text)
     return bytes(pdf.output())
 
@@ -100,11 +104,12 @@ if app_mode == "📖 Study Notes & PDF":
     with col2:
         if st.session_state.live_notes:
             if st.button("📄 Prepare Downloadable PDF", use_container_width=True):
-                st.session_state.pdf_bytes = create_pdf(st.session_state.live_notes)
-                st.success("PDF Ready!")
+                with st.spinner("Converting to PDF..."):
+                    st.session_state.pdf_bytes = create_pdf(st.session_state.live_notes)
+                    st.success("PDF Ready!")
 
     if st.session_state.pdf_bytes:
-        st.download_button("📥 Download PDF Now", st.session_state.pdf_bytes, f"{chapter}.pdf", "application/pdf", use_container_width=True)
+        st.download_button("📥 Download PDF Now", st.session_state.pdf_bytes, f"{chapter.replace(':', '')}.pdf", "application/pdf", use_container_width=True)
 
     if st.session_state.live_notes:
         st.divider()
@@ -123,7 +128,7 @@ elif app_mode == "📝 Chapter Quiz":
                 try:
                     st.session_state.quiz_data = json.loads(raw_json.replace("```json", "").replace("```", "").strip())
                 except json.JSONDecodeError:
-                    st.error(f"The AI returned badly formatted JSON. Try generating again, or switch to Gemini 2.5 Pro in the sidebar for stricter formatting.")
+                    st.error("The AI returned badly formatted JSON. Try generating again, or switch to 'Gemini 1.5 Pro' in the sidebar for stricter formatting.")
 
     if st.session_state.quiz_data:
         with st.form("quiz_form"):
@@ -131,12 +136,15 @@ elif app_mode == "📝 Chapter Quiz":
             for i, q in enumerate(st.session_state.quiz_data):
                 st.write(f"**Q{i+1}: {q['question']}**")
                 u_ans[i] = st.radio("Options", q['options'], key=f"q{i}", label_visibility="collapsed")
-            if st.form_submit_button("Submit"):
+            
+            if st.form_submit_button("Submit Answers"):
                 score = sum([1 for i, q in enumerate(st.session_state.quiz_data) if u_ans[i] == q['answer']])
                 st.metric("Score", f"{score}/10")
                 for i, q in enumerate(st.session_state.quiz_data):
-                    if u_ans[i] == q['answer']: st.success(f"Q{i+1}: Correct! {q['explanation']}")
-                    else: st.error(f"Q{i+1}: Wrong. Answer: {q['answer']}. {q['explanation']}")
+                    if u_ans[i] == q['answer']: 
+                        st.success(f"Q{i+1}: Correct! {q['explanation']}")
+                    else: 
+                        st.error(f"Q{i+1}: Wrong. Answer: {q['answer']}. {q['explanation']}")
 
 # MODE 3: 30-MARK EXAM
 elif app_mode == "🏆 30-Mark Exam":
@@ -149,7 +157,7 @@ elif app_mode == "🏆 30-Mark Exam":
                 try:
                     st.session_state.exam_data = json.loads(raw_ex.replace("```json", "").replace("```", "").strip())
                 except json.JSONDecodeError:
-                    st.error("JSON formatting error. Please try again or switch the model to Gemini 2.5 Pro.")
+                    st.error("JSON formatting error. Please try again or switch the model to 'Gemini 1.5 Pro'.")
 
     if st.session_state.exam_data:
         with st.form("exam_form"):
@@ -157,8 +165,11 @@ elif app_mode == "🏆 30-Mark Exam":
             for i, q in enumerate(st.session_state.exam_data):
                 st.write(f"**Q{i+1}: {q['question']}**")
                 e_ans[i] = st.radio("Options", q['options'], key=f"ex{i}", label_visibility="collapsed")
+            
             if st.form_submit_button("Finish Exam"):
                 final_score = sum([1 for i, q in enumerate(st.session_state.exam_data) if e_ans[i] == q['answer']])
                 st.metric("Final Result", f"{final_score}/30")
-                if final_score >= 15: st.success("🎉 You Passed!")
-                else: st.warning("📚 More practice needed.")
+                if final_score >= 15: 
+                    st.success("🎉 You Passed!")
+                else: 
+                    st.warning("📚 More practice needed.")
