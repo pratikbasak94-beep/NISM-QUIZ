@@ -27,10 +27,12 @@ QUESTIONS_PER_SESSION = 10
 SPECIAL_TEST_QS = 30            
 SPECIAL_TEST_MINS = 36          
 
-# FIXED: Reverted strictly to 1.5 models to bypass the "Limit: 0" Free Tier Error
+# UPDATED: Using the Gemini 2.5 and 2.0 models to ensure API access
 GEMINI_MODELS = [
-    {"label": "Gemini 1.5 Flash (Fastest & Free)", "id": "gemini-1.5-flash"},
-    {"label": "Gemini 1.5 Pro (Deep Reasoning)",  "id": "gemini-1.5-pro"}
+    {"label": "Gemini 2.5 Flash Lite (Fastest & Free)", "id": "gemini-2.5-flash-lite"},
+    {"label": "Gemini 2.5 Flash (Balanced)",            "id": "gemini-2.5-flash"},
+    {"label": "Gemini 2.0 Flash (Fallback)",            "id": "gemini-2.0-flash"},
+    {"label": "Gemini 2.5 Pro (Deep Reasoning)",        "id": "gemini-2.5-pro"}
 ]
 
 CHAPTERS = [
@@ -79,7 +81,6 @@ def create_pdf_bytes(markdown_text):
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # FIXED: Added more string replacements to prevent FPDF crashing on long markdown strings
     clean_markdown = markdown_text.replace('---', '').replace('***', '').replace('___', '')
     lines = clean_markdown.split('\n')
     
@@ -466,7 +467,7 @@ def preload_key(ch_id, q_num):
     return f"preload_ch{ch_id}_q{q_num}"
 
 # ─────────────────────────────────────────────
-# FIXED: MILITARY-GRADE ANTI-SKELETON PROMPT
+# MILITARY-GRADE ANTI-SKELETON PROMPT
 # ─────────────────────────────────────────────
 def _build_notes_prompt(chapter):
     workbook_text = get_chapter_text(chapter["id"], max_chars=15000) 
@@ -790,8 +791,8 @@ def page_quiz():
                 st.rerun()
 
 def page_notes():
-    st.markdown("## 📝 PDF Study Notes Generator")
-    st.markdown("*Use Gemini to deeply analyze textbook chapters into comprehensive, readable study material.*")
+    st.markdown("## 📝 Live Study Notes Generator")
+    st.markdown("*Use Gemini to deeply analyze textbook chapters into highly-detailed, exam-ready study material.*")
     st.markdown("---")
 
     chapter_options = [f"Chapter {c['id']} — {c['title']}" for c in CHAPTERS]
@@ -799,32 +800,37 @@ def page_notes():
     ch_id = int(selected_ch_str.split("—")[0].replace("Chapter", "").strip())
     chapter = get_chapter_by_id(ch_id)
 
-    if st.button("✨ Generate Study Notes"):
-        with st.spinner(f"Deeply analyzing Chapter {ch_id} and generating study material... This might take 15 seconds."):
-            notes_text = generate_chapter_notes(chapter)
-            
-            if notes_text:
-                st.session_state.current_notes = notes_text
-                st.session_state.notes_chapter_id = ch_id
-                st.session_state.notes_pdf_bytes = create_pdf_bytes(notes_text)
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        if st.button("✨ Generate Live Notes", use_container_width=True):
+            with st.spinner(f"Writing comprehensive chapter material..."):
+                notes_text = generate_chapter_notes(chapter)
+                
+                if notes_text:
+                    st.session_state.current_notes = notes_text
+                    st.session_state.notes_chapter_id = ch_id
+                    st.session_state.notes_pdf_bytes = create_pdf_bytes(notes_text)
+                    st.rerun()
             
     if "current_notes" in st.session_state and "notes_pdf_bytes" in st.session_state:
-        st.success("✅ Study Material Generated Successfully!")
+        with col2:
+            date_str = datetime.now().strftime("%Y%m%d")
+            fname = f"NISM_Academy_Study_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
+            
+            st.download_button(
+                label="📄 Download Backup PDF", 
+                data=st.session_state.notes_pdf_bytes, 
+                file_name=fname, 
+                mime="application/pdf",
+                use_container_width=True
+            )
         
-        date_str = datetime.now().strftime("%Y%m%d")
-        fname = f"NISM_Academy_Study_Notes_Ch{st.session_state.notes_chapter_id}_{date_str}.pdf"
-        
-        st.download_button(
-            label="📄 Download Study Material (PDF)", 
-            data=st.session_state.notes_pdf_bytes, 
-            file_name=fname, 
-            mime="application/pdf"
-        )
-        
+        st.markdown("---")
+        st.markdown(f"### Live Material: {chapter['title']}")
         st.markdown(f"""
-        <div class="question-box">
-            <div class="q-label">Study Notes Preview</div>
-            <div class="exp-text">{st.session_state.current_notes}</div>
+        <div style="background-color: #1a1d24; border: 1px solid #2a2d35; border-radius: 8px; padding: 25px; color: #f0e8d8;">
+            {st.session_state.current_notes}
         </div>
         """, unsafe_allow_html=True)
 
@@ -958,7 +964,6 @@ def page_review():
 # ─────────────────────────────────────────────
 def sidebar():
     with st.sidebar:
-        # FIXED: Removed size="small" from button to prevent Streamlit TypeError crash
         if "username" in st.session_state:
             st.markdown(f"👤 **Profile:** {st.session_state.username}")
             if st.button("Logout", key="logout_btn"):
@@ -989,7 +994,7 @@ def sidebar():
                 st.session_state.page = "home"
                 st.rerun()
 
-            if st.button("📝 PDF Notes Generator", use_container_width=True):
+            if st.button("📝 Live Study Notes", use_container_width=True):
                 reset_quiz()
                 st.session_state.page = "notes"
                 st.rerun()
